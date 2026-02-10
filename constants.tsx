@@ -1,14 +1,14 @@
 
 import React from 'react';
-import { 
-  Dog, 
-  Cat, 
-  ShieldCheck, 
-  HeartPulse, 
-  Bath, 
-  Syringe, 
-  Home, 
-  Scissors 
+import {
+  Dog,
+  Cat,
+  ShieldCheck,
+  HeartPulse,
+  Bath,
+  Syringe,
+  Home,
+  Scissors
 } from 'lucide-react';
 import { Product, PetService } from './types';
 
@@ -81,19 +81,5 @@ export const PRODUCTS: Product[] = [
   }
 ];
 
-export const TESTIMONIALS = [
-  {
-    id: 1,
-    name: 'Fabiana Melo',
-    content: 'O melhor atendimento que meu Golden já recebeu. A equipe de banho e tosa é maravilhosa!',
-    pet: 'Max (Golden Retriever)',
-    avatar: 'https://i.pravatar.cc/150?u=fabiana'
-  },
-  {
-    id: 2,
-    name: 'André Soares',
-    content: 'Agendei a consulta pelo site e foi super rápido. O veterinário foi muito atencioso.',
-    pet: 'Luna (Persa)',
-    avatar: 'https://i.pravatar.cc/150?u=andre'
-  }
-];
+
+

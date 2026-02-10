@@ -7,7 +7,7 @@ import {
   ChevronDown, LogOut, Package, Settings, Trash2,
   Clock, PawPrint, ShieldCheck
 } from 'lucide-react';
-import { PRODUCTS, PET_SERVICES, TESTIMONIALS } from './constants';
+import { PRODUCTS, PET_SERVICES } from './constants';
 import { Product, User } from './types';
 import PetAIAdvisor from './components/PetAIAdvisor';
 
@@ -400,29 +400,7 @@ const HomeView: React.FC<{
       </div>
     </section>
 
-    {/* Testimonials */}
-    <section className="py-24 bg-slate-50">
-      <div className="container mx-auto px-4">
-        <div className="max-w-4xl mx-auto">
-          <h2 className="text-3xl font-black text-center mb-16">O que os tutores dizem</h2>
-          <div className="grid md:grid-cols-2 gap-8">
-            {TESTIMONIALS.map(t => (
-              <div key={t.id} className="bg-white p-8 rounded-3xl shadow-sm border border-slate-100 relative">
-                <div className="flex gap-1 mb-4 text-orange-400"><Star size={16} fill="currentColor" /><Star size={16} fill="currentColor" /><Star size={16} fill="currentColor" /><Star size={16} fill="currentColor" /><Star size={16} fill="currentColor" /></div>
-                <p className="text-slate-600 italic mb-8">"{t.content}"</p>
-                <div className="flex items-center gap-4">
-                  <img src={t.avatar} className="w-12 h-12 rounded-full object-cover" />
-                  <div>
-                    <h4 className="font-bold text-slate-800">{t.name}</h4>
-                    <p className="text-xs text-slate-500">Tutor(a) do {t.pet}</p>
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-    </section>
+
   </div>
 );
 
