@@ -1,0 +1,8 @@
+
+{
+  "name": "PetVibe - Petshop & Clinic",
+  "description": "Um petshop moderno e completo com loja virtual, agendamentos veterinários e consultoria via IA para cuidados com seu pet.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
