@@ -1,15 +1,23 @@
 
 import React, { useState, useEffect } from 'react';
-import { 
-  Menu, X, Search, ShoppingCart, User as UserIcon, 
+import {
+  Menu, X, Search, ShoppingCart, User as UserIcon,
   Heart, Calendar, MapPin, Phone, MessageCircle,
   Facebook, Instagram, ArrowRight, Star, Filter,
   ChevronDown, LogOut, Package, Settings, Trash2,
-  Clock, PawPrint, ShieldCheck
+  Clock, PawPrint, ShieldCheck, Mail, Lock
 } from 'lucide-react';
+import {
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,
+  signOut,
+  onAuthStateChanged,
+  updateProfile
+} from 'firebase/auth';
+import { auth } from './services/firebase';
 import { PRODUCTS, PET_SERVICES } from './constants';
 import { Product, User } from './types';
-import PetAIAdvisor from './components/PetAIAdvisor';
+
 
 // --- State and Context ---
 type View = 'home' | 'store' | 'services' | 'about' | 'contact' | 'appointment' | 'profile';
@@ -22,6 +30,68 @@ const App: React.FC = () => {
   const [cart, setCart] = useState<Product[]>([]);
   const [user, setUser] = useState<User | null>(null);
   const [isCartOpen, setIsCartOpen] = useState(false);
+  const [authLoading, setAuthLoading] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+
+  // Auth synchronization
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
+      if (firebaseUser) {
+        setUser({
+          id: firebaseUser.uid,
+          name: firebaseUser.displayName || 'Usuário',
+          email: firebaseUser.email || '',
+          phone: '',
+          pets: []
+        });
+      } else {
+        setUser(null);
+      }
+    });
+    return () => unsubscribe();
+  }, []);
+
+  const handleAuth = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    setAuthError(null);
+    setAuthLoading(true);
+
+    const formData = new FormData(e.currentTarget);
+    const email = formData.get('email') as string;
+    const password = formData.get('password') as string;
+    const name = formData.get('name') as string;
+
+    try {
+      if (authView === 'signup') {
+        const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+        await updateProfile(userCredential.user, { displayName: name });
+        setUser({
+          id: userCredential.user.uid,
+          name: name,
+          email: email,
+          phone: '',
+          pets: []
+        });
+      } else if (authView === 'login') {
+        await signInWithEmailAndPassword(auth, email, password);
+      }
+      setIsAuthModalOpen(false);
+    } catch (error: any) {
+      console.error("Auth error:", error);
+      setAuthError(error.message);
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const logout = async () => {
+    try {
+      await signOut(auth);
+      setCurrentView('home');
+    } catch (error) {
+      console.error("Logout error:", error);
+    }
+  };
 
   // Scroll to top on view change
   useEffect(() => {
@@ -45,15 +115,15 @@ const App: React.FC = () => {
       {/* Navigation */}
       <nav className="fixed w-full z-50 bg-white/90 backdrop-blur-md border-b border-slate-100">
         <div className="container mx-auto px-4 flex justify-between items-center h-20">
-          <button 
-            onClick={() => setCurrentView('home')} 
+          <button
+            onClick={() => setCurrentView('home')}
             className="flex items-center gap-2 group"
           >
             <div className="w-10 h-10 bg-teal-600 rounded-xl flex items-center justify-center text-white shadow-lg group-hover:rotate-12 transition-transform">
               <PawPrint size={24} />
             </div>
             <span className="text-2xl font-black text-slate-800 tracking-tight">
-              Pet<span className="text-teal-600">Vibe</span>
+              JE <span className="text-teal-600">Pet</span>
             </span>
           </button>
 
@@ -66,7 +136,7 @@ const App: React.FC = () => {
           </div>
 
           <div className="flex items-center gap-3 md:gap-5">
-            <button 
+            <button
               onClick={() => setIsCartOpen(true)}
               className="relative p-2 text-slate-600 hover:text-teal-600"
             >
@@ -77,9 +147,9 @@ const App: React.FC = () => {
                 </span>
               )}
             </button>
-            
+
             {user ? (
-              <button 
+              <button
                 onClick={() => setCurrentView('profile')}
                 className="flex items-center gap-2 bg-slate-50 border border-slate-200 px-4 py-2 rounded-full hover:bg-slate-100"
               >
@@ -89,7 +159,7 @@ const App: React.FC = () => {
                 <span className="hidden sm:inline text-sm font-bold text-slate-700">{user.name.split(' ')[0]}</span>
               </button>
             ) : (
-              <button 
+              <button
                 onClick={() => { setAuthView('login'); setIsAuthModalOpen(true); }}
                 className="bg-teal-600 text-white px-6 py-2.5 rounded-full font-bold shadow-lg hover:bg-teal-700 transition-all flex items-center gap-2"
               >
@@ -118,7 +188,7 @@ const App: React.FC = () => {
           <button onClick={() => setCurrentView('services')} className="text-2xl font-bold py-2">Serviços</button>
           <button onClick={() => setCurrentView('about')} className="text-2xl font-bold py-2">Sobre</button>
           <button onClick={() => setCurrentView('contact')} className="text-2xl font-bold py-2">Contato</button>
-          <button 
+          <button
             onClick={() => { setIsMenuOpen(false); setCurrentView('appointment'); }}
             className="mt-4 bg-teal-600 text-white w-full py-4 rounded-2xl font-bold shadow-xl"
           >
@@ -135,7 +205,7 @@ const App: React.FC = () => {
         {currentView === 'about' && <AboutView />}
         {currentView === 'contact' && <ContactView />}
         {currentView === 'appointment' && <AppointmentView />}
-        {currentView === 'profile' && <ProfileView user={user} onLogout={() => setUser(null)} />}
+        {currentView === 'profile' && <ProfileView user={user} onLogout={logout} />}
       </main>
 
       {/* Footer */}
@@ -146,7 +216,7 @@ const App: React.FC = () => {
               <div className="w-8 h-8 bg-teal-600 rounded-lg flex items-center justify-center text-white">
                 <PawPrint size={20} />
               </div>
-              <span className="text-xl font-black text-white tracking-tight">PetVibe</span>
+              <span className="text-xl font-black text-white tracking-tight">JE Pet</span>
             </div>
             <p className="leading-relaxed text-sm">
               Dedicados ao bem-estar animal com tecnologia, carinho e responsabilidade desde 2015.
@@ -184,7 +254,7 @@ const App: React.FC = () => {
           </div>
         </div>
         <div className="text-center text-xs text-slate-500">
-          © 2026 PetVibe Petshop & Clinic. Todos os direitos reservados.
+          © 2026 JE Pet Petshop & Clinic. Todos os direitos reservados.
         </div>
       </footer>
 
@@ -199,7 +269,7 @@ const App: React.FC = () => {
               </h2>
               <button onClick={() => setIsCartOpen(false)} className="p-2"><X size={24} /></button>
             </div>
-            
+
             <div className="flex-1 overflow-y-auto p-6 space-y-4">
               {cart.length === 0 ? (
                 <div className="text-center py-20">
@@ -226,7 +296,7 @@ const App: React.FC = () => {
                 <span className="text-slate-500 font-medium">Total</span>
                 <span className="text-2xl font-black text-slate-900">R$ {cartTotal.toFixed(2)}</span>
               </div>
-              <button 
+              <button
                 disabled={cart.length === 0}
                 className="w-full bg-teal-600 text-white py-4 rounded-2xl font-bold text-lg hover:bg-teal-700 shadow-xl disabled:opacity-50"
                 onClick={() => { alert('Redirecionando para pagamento...'); setIsCartOpen(false); }}
@@ -244,7 +314,7 @@ const App: React.FC = () => {
           <div className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm" onClick={() => setIsAuthModalOpen(false)}></div>
           <div className="bg-white w-full max-w-md p-8 rounded-3xl relative z-10 shadow-2xl animate-scaleUp">
             <button onClick={() => setIsAuthModalOpen(false)} className="absolute top-4 right-4 text-slate-400 hover:text-slate-600"><X size={24} /></button>
-            
+
             <div className="text-center mb-8">
               <div className="w-16 h-16 bg-teal-100 rounded-2xl flex items-center justify-center mx-auto mb-4 text-teal-600">
                 <UserIcon size={32} />
@@ -254,20 +324,40 @@ const App: React.FC = () => {
               </h2>
             </div>
 
-            <form className="space-y-4" onSubmit={(e) => {
-              e.preventDefault();
-              setUser({ id: '1', name: 'Usuario Teste', email: 'test@petvibe.com', phone: '1199999999', pets: [] });
-              setIsAuthModalOpen(false);
-            }}>
+            <form className="space-y-4" onSubmit={handleAuth}>
               {authView === 'signup' && (
-                <input type="text" placeholder="Nome Completo" className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-teal-500 outline-none" required />
+                <div className="relative">
+                  <UserIcon className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+                  <input name="name" type="text" placeholder="Nome Completo" className="w-full pl-12 pr-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-teal-500 outline-none" required />
+                </div>
               )}
-              <input type="email" placeholder="Seu melhor e-mail" className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-teal-500 outline-none" required />
+              <div className="relative">
+                <Mail className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+                <input name="email" type="email" placeholder="Seu melhor e-mail" className="w-full pl-12 pr-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-teal-500 outline-none" required />
+              </div>
               {authView !== 'forgot' && (
-                <input type="password" placeholder="Senha secreta" className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-teal-500 outline-none" required />
+                <div className="relative">
+                  <Lock className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+                  <input name="password" type="password" placeholder="Senha secreta" className="w-full pl-12 pr-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-teal-500 outline-none" required />
+                </div>
               )}
-              <button className="w-full bg-teal-600 text-white py-4 rounded-xl font-bold hover:bg-teal-700 transition-all shadow-lg">
-                {authView === 'login' ? 'Entrar' : authView === 'signup' ? 'Cadastrar' : 'Enviar Link'}
+
+              {authError && (
+                <div className="p-3 bg-red-50 text-red-600 text-xs rounded-lg border border-red-100 italic">
+                  {authError}
+                </div>
+              )}
+
+              <button
+                type="submit"
+                disabled={authLoading}
+                className="w-full bg-teal-600 text-white py-4 rounded-xl font-bold hover:bg-teal-700 transition-all shadow-lg disabled:opacity-50 flex items-center justify-center gap-2"
+              >
+                {authLoading ? (
+                  <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
+                ) : (
+                  authView === 'login' ? 'Entrar' : authView === 'signup' ? 'Cadastrar' : 'Enviar Link'
+                )}
               </button>
             </form>
 
@@ -291,10 +381,10 @@ const App: React.FC = () => {
 
 // --- Sub-Views Components ---
 
-const HomeView: React.FC<{ 
-  onNavigateStore: () => void, 
+const HomeView: React.FC<{
+  onNavigateStore: () => void,
   onNavigateAppoint: () => void,
-  onAddCart: (p: Product) => void 
+  onAddCart: (p: Product) => void
 }> = ({ onNavigateStore, onNavigateAppoint, onAddCart }) => (
   <div className="animate-fadeIn">
     {/* Hero Section */}
@@ -330,9 +420,9 @@ const HomeView: React.FC<{
         </div>
         <div className="relative">
           <div className="absolute -inset-4 bg-teal-200 rounded-full blur-3xl opacity-30 animate-pulse"></div>
-          <img 
-            src="https://images.unsplash.com/photo-1516734212186-a967f81ad0d7?auto=format&fit=crop&q=80&w=800" 
-            alt="Pet" 
+          <img
+            src="https://images.unsplash.com/photo-1516734212186-a967f81ad0d7?auto=format&fit=crop&q=80&w=800"
+            alt="Pet"
             className="relative rounded-[60px] shadow-2xl border-[16px] border-white z-10"
           />
           <div className="absolute -bottom-8 -left-8 bg-white p-6 rounded-3xl shadow-2xl z-20 animate-bounce">
@@ -362,7 +452,7 @@ const HomeView: React.FC<{
             <div key={p.id} className="group bg-slate-50 p-4 rounded-3xl border border-transparent hover:border-teal-100 hover:bg-white hover:shadow-2xl transition-all duration-300">
               <div className="relative aspect-square overflow-hidden rounded-2xl mb-4">
                 <img src={p.imageUrl} alt={p.name} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500" />
-                <button 
+                <button
                   onClick={() => onAddCart(p)}
                   className="absolute bottom-3 right-3 bg-white p-3 rounded-xl text-teal-600 shadow-xl opacity-0 group-hover:opacity-100 translate-y-4 group-hover:translate-y-0 transition-all"
                 >
@@ -377,8 +467,7 @@ const HomeView: React.FC<{
       </div>
     </section>
 
-    {/* AI Advisor Integration */}
-    <PetAIAdvisor />
+
 
     {/* Services Overview */}
     <section className="py-24 bg-white">
@@ -406,9 +495,9 @@ const HomeView: React.FC<{
 
 const StoreView: React.FC<{ onAddCart: (p: Product) => void }> = ({ onAddCart }) => {
   const [filter, setFilter] = useState<'all' | 'racao' | 'brinquedo' | 'acessorio' | 'higiene'>('all');
-  
-  const filteredProducts = filter === 'all' 
-    ? PRODUCTS 
+
+  const filteredProducts = filter === 'all'
+    ? PRODUCTS
     : PRODUCTS.filter(p => p.category === filter);
 
   return (
@@ -423,7 +512,7 @@ const StoreView: React.FC<{ onAddCart: (p: Product) => void }> = ({ onAddCart })
               </h3>
               <div className="space-y-2">
                 {['all', 'racao', 'brinquedo', 'acessorio', 'higiene'].map(cat => (
-                  <button 
+                  <button
                     key={cat}
                     onClick={() => setFilter(cat as any)}
                     className={`w-full text-left px-4 py-3 rounded-xl capitalize font-medium transition-all ${filter === cat ? 'bg-teal-600 text-white' : 'hover:bg-slate-50 text-slate-600'}`}
@@ -441,9 +530,9 @@ const StoreView: React.FC<{ onAddCart: (p: Product) => void }> = ({ onAddCart })
               <h2 className="text-3xl font-black">Resultados ({filteredProducts.length})</h2>
               <div className="relative w-full sm:w-auto">
                 <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
-                <input 
-                  type="text" 
-                  placeholder="Buscar produto..." 
+                <input
+                  type="text"
+                  placeholder="Buscar produto..."
                   className="w-full sm:w-80 pl-12 pr-4 py-3 rounded-2xl bg-white border border-slate-200 outline-none focus:ring-2 focus:ring-teal-500"
                 />
               </div>
@@ -463,7 +552,7 @@ const StoreView: React.FC<{ onAddCart: (p: Product) => void }> = ({ onAddCart })
                     <p className="text-slate-500 text-sm mb-6 line-clamp-2">{p.description}</p>
                     <div className="flex justify-between items-center">
                       <span className="text-2xl font-black text-slate-900">R$ {p.price.toFixed(2)}</span>
-                      <button 
+                      <button
                         onClick={() => onAddCart(p)}
                         className="bg-teal-600 text-white px-5 py-3 rounded-2xl font-bold hover:bg-teal-700 shadow-lg shadow-teal-500/20 active:scale-95 transition-all flex items-center gap-2"
                       >
@@ -506,10 +595,10 @@ const AppointmentView: React.FC = () => {
               <div className="space-y-6">
                 <div>
                   <label className="block text-sm font-bold text-slate-700 mb-2">Qual o nome do seu pet?</label>
-                  <input 
-                    type="text" 
+                  <input
+                    type="text"
                     value={formData.petName}
-                    onChange={(e) => setFormData({...formData, petName: e.target.value})}
+                    onChange={(e) => setFormData({ ...formData, petName: e.target.value })}
                     placeholder="Ex: Totó, Mel, Bilu..."
                     className="w-full px-4 py-4 rounded-2xl border border-slate-200 outline-none focus:ring-2 focus:ring-teal-500"
                   />
@@ -517,21 +606,21 @@ const AppointmentView: React.FC = () => {
                 <div>
                   <label className="block text-sm font-bold text-slate-700 mb-2">É um cão ou gato?</label>
                   <div className="flex gap-4">
-                    <button 
-                      onClick={() => setFormData({...formData, petType: 'cao'})}
+                    <button
+                      onClick={() => setFormData({ ...formData, petType: 'cao' })}
                       className={`flex-1 p-4 rounded-2xl border-2 font-bold transition-all ${formData.petType === 'cao' ? 'border-teal-500 bg-teal-50 text-teal-700' : 'border-slate-100 text-slate-500'}`}
                     >
                       🐶 Cão
                     </button>
-                    <button 
-                      onClick={() => setFormData({...formData, petType: 'gato'})}
+                    <button
+                      onClick={() => setFormData({ ...formData, petType: 'gato' })}
                       className={`flex-1 p-4 rounded-2xl border-2 font-bold transition-all ${formData.petType === 'gato' ? 'border-teal-500 bg-teal-50 text-teal-700' : 'border-slate-100 text-slate-500'}`}
                     >
                       🐱 Gato
                     </button>
                   </div>
                 </div>
-                <button 
+                <button
                   disabled={!formData.petName}
                   onClick={() => setStep(2)}
                   className="w-full bg-teal-600 text-white py-5 rounded-2xl font-bold text-lg hover:bg-teal-700 shadow-xl disabled:opacity-50"
@@ -543,9 +632,9 @@ const AppointmentView: React.FC = () => {
               <div className="space-y-6">
                 <div>
                   <label className="block text-sm font-bold text-slate-700 mb-2">Escolha o serviço</label>
-                  <select 
+                  <select
                     value={formData.type}
-                    onChange={(e) => setFormData({...formData, type: e.target.value})}
+                    onChange={(e) => setFormData({ ...formData, type: e.target.value })}
                     className="w-full px-4 py-4 rounded-2xl border border-slate-200 outline-none focus:ring-2 focus:ring-teal-500 appearance-none bg-white"
                   >
                     <option value="consulta-geral">Consulta Geral</option>
@@ -557,26 +646,26 @@ const AppointmentView: React.FC = () => {
                 <div className="grid grid-cols-2 gap-4">
                   <div>
                     <label className="block text-sm font-bold text-slate-700 mb-2">Data</label>
-                    <input 
-                      type="date" 
+                    <input
+                      type="date"
                       value={formData.date}
-                      onChange={(e) => setFormData({...formData, date: e.target.value})}
+                      onChange={(e) => setFormData({ ...formData, date: e.target.value })}
                       className="w-full px-4 py-4 rounded-2xl border border-slate-200 outline-none focus:ring-2 focus:ring-teal-500"
                     />
                   </div>
                   <div>
                     <label className="block text-sm font-bold text-slate-700 mb-2">Horário</label>
-                    <input 
-                      type="time" 
+                    <input
+                      type="time"
                       value={formData.time}
-                      onChange={(e) => setFormData({...formData, time: e.target.value})}
+                      onChange={(e) => setFormData({ ...formData, time: e.target.value })}
                       className="w-full px-4 py-4 rounded-2xl border border-slate-200 outline-none focus:ring-2 focus:ring-teal-500"
                     />
                   </div>
                 </div>
                 <div className="flex gap-4">
                   <button onClick={() => setStep(1)} className="flex-1 border-2 border-slate-200 py-4 rounded-2xl font-bold hover:bg-slate-50">Voltar</button>
-                  <button 
+                  <button
                     disabled={!formData.date || !formData.time}
                     onClick={() => setStep(3)}
                     className="flex-[2] bg-teal-600 text-white py-4 rounded-2xl font-bold shadow-xl"
@@ -646,7 +735,7 @@ const AboutView: React.FC = () => (
         <div className="space-y-8">
           <h2 className="text-4xl font-black leading-tight text-slate-900">Apaixonados por pets, movidos pela excelência.</h2>
           <p className="text-lg text-slate-600">
-            Fundada em 2015, a PetVibe nasceu da necessidade de um atendimento mais humanizado e tecnológico no setor pet. Nossa missão é facilitar a vida dos tutores enquanto proporcionamos a melhor experiênica possível para os animais.
+            Fundada em 2015, a JE Pet nasceu da necessidade de um atendimento mais humanizado e tecnológico no setor pet. Nossa missão é facilitar a vida dos tutores enquanto proporcionamos a melhor experiênica possível para os animais.
           </p>
           <div className="grid grid-cols-2 gap-8">
             <div>
@@ -737,7 +826,7 @@ const ProfileView: React.FC<{ user: User | null, onLogout: () => void }> = ({ us
             </div>
           </div>
         </aside>
-        
+
         <div className="lg:col-span-3 space-y-8">
           <div className="bg-white rounded-3xl border border-slate-100 p-8 shadow-sm">
             <h2 className="text-2xl font-bold mb-8">Dados Pessoais</h2>
