@@ -9,6 +9,7 @@ export interface Product {
   imageUrl: string;
   petType: 'cao' | 'gato' | 'outros';
   description: string;
+  assignedPet?: string;
 }
 
 export interface PetService {

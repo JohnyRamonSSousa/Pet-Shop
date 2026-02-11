@@ -5,16 +5,25 @@ import {
   Heart, Calendar, MapPin, Phone, MessageCircle,
   Facebook, Instagram, ArrowRight, Star, Filter,
   ChevronDown, LogOut, Package, Settings, Trash2,
-  Clock, PawPrint, ShieldCheck, Mail, Lock
+  Clock, PawPrint, ShieldCheck, Mail, Lock, Plus
 } from 'lucide-react';
 import {
   createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
   signOut,
   onAuthStateChanged,
-  updateProfile
+  updateProfile,
+  deleteUser
 } from 'firebase/auth';
-import { auth } from './services/firebase';
+import {
+  doc,
+  setDoc,
+  getDoc,
+  onSnapshot,
+  updateDoc,
+  arrayUnion
+} from 'firebase/firestore';
+import { auth, db } from './services/firebase';
 import { PRODUCTS, PET_SERVICES } from './constants';
 import { Product, User } from './types';
 
@@ -32,23 +41,50 @@ const App: React.FC = () => {
   const [isCartOpen, setIsCartOpen] = useState(false);
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [showDeleteSuccess, setShowDeleteSuccess] = useState(false);
 
   // Auth synchronization
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
+    let unsubscribeFirestore: (() => void) | null = null;
+
+    const unsubscribeAuth = onAuthStateChanged(auth, async (firebaseUser) => {
       if (firebaseUser) {
-        setUser({
-          id: firebaseUser.uid,
-          name: firebaseUser.displayName || 'Usuário',
-          email: firebaseUser.email || '',
-          phone: '',
-          pets: []
+        // Start real-time Firestore listener
+        const userDocRef = doc(db, 'users', firebaseUser.uid);
+
+        unsubscribeFirestore = onSnapshot(userDocRef, (docSnap) => {
+          if (docSnap.exists()) {
+            const data = docSnap.data();
+            setUser({
+              id: firebaseUser.uid,
+              name: data.name || firebaseUser.displayName || 'Usuário',
+              email: data.email || firebaseUser.email || '',
+              phone: data.phone || '',
+              pets: data.pets || []
+            });
+          } else {
+            // Initialize document if it doesn't exist
+            const newUser = {
+              id: firebaseUser.uid,
+              name: firebaseUser.displayName || 'Usuário',
+              email: firebaseUser.email || '',
+              phone: '',
+              pets: []
+            };
+            setDoc(userDocRef, newUser);
+            setUser(newUser);
+          }
         });
       } else {
+        if (unsubscribeFirestore) unsubscribeFirestore();
         setUser(null);
       }
     });
-    return () => unsubscribe();
+
+    return () => {
+      unsubscribeAuth();
+      if (unsubscribeFirestore) unsubscribeFirestore();
+    };
   }, []);
 
   const handleAuth = async (e: React.FormEvent<HTMLFormElement>) => {
@@ -93,14 +129,48 @@ const App: React.FC = () => {
     }
   };
 
+  const deleteAccount = async () => {
+    if (!auth.currentUser) return;
+    try {
+      await deleteUser(auth.currentUser);
+      setUser(null);
+      setCurrentView('home');
+      setShowDeleteSuccess(true);
+    } catch (error: any) {
+      console.error("Delete account error:", error);
+      alert('Erro ao excluir conta: ' + error.message + '. Você pode precisar sair e entrar novamente para realizar esta ação.');
+    }
+  };
+
+  const addPet = async (pet: { name: string, breed: string, type: string }) => {
+    if (!user) return;
+    try {
+      const userDocRef = doc(db, 'users', user.id);
+      await updateDoc(userDocRef, {
+        pets: arrayUnion(pet)
+      });
+    } catch (error: any) {
+      console.error("Add pet error:", error);
+      alert("Erro ao adicionar pet: " + error.message);
+    }
+  };
+
   // Scroll to top on view change
   useEffect(() => {
     window.scrollTo(0, 0);
     setIsMenuOpen(false);
   }, [currentView]);
 
-  const addToCart = (product: Product) => {
-    setCart([...cart, product]);
+  // Redirection guard: go home if not logged in and on profile view
+  useEffect(() => {
+    if (!user && currentView === 'profile') {
+      setCurrentView('home');
+    }
+  }, [user, currentView]);
+
+  const addToCart = (product: Product, petName?: string) => {
+    const productWithPet = { ...product, assignedPet: petName };
+    setCart([...cart, productWithPet]);
     setIsCartOpen(true);
   };
 
@@ -200,12 +270,19 @@ const App: React.FC = () => {
       {/* Main Content */}
       <main className="flex-1 pt-20">
         {currentView === 'home' && <HomeView onNavigateStore={() => setCurrentView('store')} onNavigateAppoint={() => setCurrentView('appointment')} onAddCart={addToCart} />}
-        {currentView === 'store' && <StoreView onAddCart={addToCart} />}
+        {currentView === 'store' && <StoreView user={user} onAddCart={addToCart} />}
         {currentView === 'services' && <ServicesView onNavigateAppoint={() => setCurrentView('appointment')} />}
         {currentView === 'about' && <AboutView />}
         {currentView === 'contact' && <ContactView />}
-        {currentView === 'appointment' && <AppointmentView />}
-        {currentView === 'profile' && <ProfileView user={user} onLogout={logout} />}
+        {currentView === 'appointment' && <AppointmentView user={user} />}
+        {currentView === 'profile' && (
+          <ProfileView
+            user={user}
+            onLogout={logout}
+            onDeleteAccount={deleteAccount}
+            onAddPet={addPet}
+          />
+        )}
       </main>
 
       {/* Footer */}
@@ -283,7 +360,14 @@ const App: React.FC = () => {
                     <img src={item.imageUrl} className="w-20 h-20 object-cover rounded-xl" />
                     <div className="flex-1">
                       <h4 className="font-bold text-slate-800 text-sm">{item.name}</h4>
-                      <p className="text-teal-600 font-bold">R$ {item.price.toFixed(2)}</p>
+                      <div className="flex flex-col">
+                        <p className="text-teal-600 font-bold">R$ {item.price.toFixed(2)}</p>
+                        {item.assignedPet && (
+                          <span className="text-[10px] bg-teal-100 text-teal-700 font-bold px-2 py-0.5 rounded-full w-fit mt-1">
+                            Para: {item.assignedPet}
+                          </span>
+                        )}
+                      </div>
                     </div>
                     <button onClick={() => removeFromCart(item.id)} className="text-slate-400 hover:text-red-500 p-2"><Trash2 size={18} /></button>
                   </div>
@@ -493,15 +577,16 @@ const HomeView: React.FC<{
   </div>
 );
 
-const StoreView: React.FC<{ onAddCart: (p: Product) => void }> = ({ onAddCart }) => {
+const StoreView: React.FC<{ user: User | null, onAddCart: (p: Product, petName?: string) => void }> = ({ user, onAddCart }) => {
   const [filter, setFilter] = useState<'all' | 'racao' | 'brinquedo' | 'acessorio' | 'higiene'>('all');
+  const [buyingProduct, setBuyingProduct] = useState<Product | null>(null);
 
   const filteredProducts = filter === 'all'
     ? PRODUCTS
     : PRODUCTS.filter(p => p.category === filter);
 
   return (
-    <div className="py-12 animate-fadeIn">
+    <div className="py-12 animate-fadeIn relative">
       <div className="container mx-auto px-4">
         <div className="flex flex-col lg:flex-row gap-8">
           {/* Filters Sidebar */}
@@ -528,14 +613,6 @@ const StoreView: React.FC<{ onAddCart: (p: Product) => void }> = ({ onAddCart })
           <div className="flex-1">
             <div className="flex flex-col sm:flex-row justify-between items-center mb-8 gap-4">
               <h2 className="text-3xl font-black">Resultados ({filteredProducts.length})</h2>
-              <div className="relative w-full sm:w-auto">
-                <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
-                <input
-                  type="text"
-                  placeholder="Buscar produto..."
-                  className="w-full sm:w-80 pl-12 pr-4 py-3 rounded-2xl bg-white border border-slate-200 outline-none focus:ring-2 focus:ring-teal-500"
-                />
-              </div>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-8">
@@ -553,7 +630,13 @@ const StoreView: React.FC<{ onAddCart: (p: Product) => void }> = ({ onAddCart })
                     <div className="flex justify-between items-center">
                       <span className="text-2xl font-black text-slate-900">R$ {p.price.toFixed(2)}</span>
                       <button
-                        onClick={() => onAddCart(p)}
+                        onClick={() => {
+                          if (user?.pets && user.pets.length > 0) {
+                            setBuyingProduct(p);
+                          } else {
+                            onAddCart(p);
+                          }
+                        }}
                         className="bg-teal-600 text-white px-5 py-3 rounded-2xl font-bold hover:bg-teal-700 shadow-lg shadow-teal-500/20 active:scale-95 transition-all flex items-center gap-2"
                       >
                         <ShoppingCart size={18} /> Comprar
@@ -566,11 +649,60 @@ const StoreView: React.FC<{ onAddCart: (p: Product) => void }> = ({ onAddCart })
           </div>
         </div>
       </div>
+
+      {/* Pet Selection Modal for Buying */}
+      {buyingProduct && (
+        <div className="fixed inset-0 z-[150] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm" onClick={() => setBuyingProduct(null)}></div>
+          <div className="bg-white w-full max-w-lg p-8 rounded-[40px] relative z-10 shadow-2xl animate-scaleUp">
+            <button onClick={() => setBuyingProduct(null)} className="absolute top-6 right-6 p-2 text-slate-400 hover:text-slate-600 transition-colors">
+              <X size={24} />
+            </button>
+            <div className="text-center mb-8">
+              <div className="w-16 h-16 bg-teal-100 text-teal-600 rounded-2xl flex items-center justify-center mx-auto mb-4">
+                <PawPrint size={32} />
+              </div>
+              <h2 className="text-2xl font-bold">Comprar para qual pet?</h2>
+              <p className="text-slate-500 mt-2">Personalize sua compra para um de seus pets.</p>
+            </div>
+
+            <div className="grid sm:grid-cols-2 gap-3 mb-8">
+              {user?.pets.map((pet, idx) => (
+                <button
+                  key={idx}
+                  onClick={() => {
+                    onAddCart(buyingProduct, pet.name);
+                    setBuyingProduct(null);
+                  }}
+                  className="flex items-center gap-3 p-4 bg-slate-50 rounded-2xl border border-slate-200 hover:border-teal-500 hover:bg-teal-50 hover:shadow-lg transition-all text-left"
+                >
+                  <div className="w-10 h-10 bg-white rounded-xl flex items-center justify-center text-teal-600">
+                    <PawPrint size={20} />
+                  </div>
+                  <span className="font-bold text-slate-700">{pet.name}</span>
+                </button>
+              ))}
+              <button
+                onClick={() => {
+                  onAddCart(buyingProduct);
+                  setBuyingProduct(null);
+                }}
+                className="flex items-center gap-3 p-4 bg-white rounded-2xl border border-dashed border-slate-300 hover:border-slate-500 hover:bg-slate-50 transition-all text-left"
+              >
+                <div className="w-10 h-10 bg-slate-100 rounded-xl flex items-center justify-center text-slate-400">
+                  <UserIcon size={20} />
+                </div>
+                <span className="font-bold text-slate-400">Nenhum em especial</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
 
-const AppointmentView: React.FC = () => {
+const AppointmentView: React.FC<{ user: User | null }> = ({ user }) => {
   const [step, setStep] = useState(1);
   const [formData, setFormData] = useState({
     petName: '',
@@ -592,55 +724,96 @@ const AppointmentView: React.FC = () => {
 
           <div className="p-8 lg:p-12">
             {step === 1 ? (
-              <div className="space-y-6">
-                <div>
-                  <label className="block text-sm font-bold text-slate-700 mb-2">Qual o nome do seu pet?</label>
-                  <input
-                    type="text"
-                    value={formData.petName}
-                    onChange={(e) => setFormData({ ...formData, petName: e.target.value })}
-                    placeholder="Ex: Totó, Mel, Bilu..."
-                    className="w-full px-4 py-4 rounded-2xl border border-slate-200 outline-none focus:ring-2 focus:ring-teal-500"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-bold text-slate-700 mb-2">É um cão ou gato?</label>
-                  <div className="flex gap-4">
+              <div className="space-y-8">
+                {user?.pets && user.pets.length > 0 ? (
+                  <div>
+                    <label className="block text-sm font-bold text-slate-700 mb-4 uppercase tracking-wider">Qual pet deseja agendar?</label>
+                    <div className="grid grid-cols-2 gap-4">
+                      {user.pets.map((pet, idx) => (
+                        <button
+                          key={idx}
+                          onClick={() => {
+                            setFormData({ ...formData, petName: pet.name, petType: pet.type });
+                            setStep(2);
+                          }}
+                          className="flex items-center gap-4 p-5 bg-slate-50 rounded-2xl border-2 border-slate-100 hover:border-teal-500 hover:bg-teal-50 hover:shadow-lg transition-all text-left group"
+                        >
+                          <div className="w-12 h-12 bg-white rounded-xl flex items-center justify-center text-teal-600 shadow-sm group-hover:bg-teal-600 group-hover:text-white transition-all">
+                            <PawPrint size={24} />
+                          </div>
+                          <div>
+                            <p className="font-bold text-slate-800">{pet.name}</p>
+                            <p className="text-[10px] text-slate-500 uppercase tracking-widest">{pet.type} • {pet.breed}</p>
+                          </div>
+                        </button>
+                      ))}
+                      <button
+                        onClick={() => {
+                          setFormData({ ...formData, petName: '', petType: 'cao' });
+                        }}
+                        className="flex items-center gap-4 p-5 bg-white rounded-2xl border-2 border-dashed border-slate-200 hover:border-slate-400 transition-all text-left"
+                      >
+                        <div className="w-12 h-12 bg-slate-50 rounded-xl flex items-center justify-center text-slate-400">
+                          <Plus size={24} />
+                        </div>
+                        <p className="font-bold text-slate-400">Outro Pet</p>
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+
+                {(!user?.pets || user.pets.length === 0 || !formData.petName) && (
+                  <div className="space-y-6 animate-fadeIn">
+                    <div>
+                      <label className="block text-sm font-bold text-slate-700 mb-2">Qual o nome do seu pet?</label>
+                      <input
+                        type="text"
+                        value={formData.petName}
+                        onChange={(e) => setFormData({ ...formData, petName: e.target.value })}
+                        placeholder="Ex: Totó, Mel, Bilu..."
+                        className="w-full px-4 py-4 rounded-2xl border border-slate-200 outline-none focus:ring-2 focus:ring-teal-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-bold text-slate-700 mb-2">É um cão ou gato?</label>
+                      <div className="flex gap-4">
+                        <button
+                          onClick={() => setFormData({ ...formData, petType: 'cao' })}
+                          className={`flex-1 p-4 rounded-2xl border-2 font-bold transition-all ${formData.petType === 'cao' ? 'border-teal-500 bg-teal-50 text-teal-700' : 'border-slate-100 text-slate-500'}`}
+                        >
+                          🐶 Cão
+                        </button>
+                        <button
+                          onClick={() => setFormData({ ...formData, petType: 'gato' })}
+                          className={`flex-1 p-4 rounded-2xl border-2 font-bold transition-all ${formData.petType === 'gato' ? 'border-teal-500 bg-teal-50 text-teal-700' : 'border-slate-100 text-slate-500'}`}
+                        >
+                          🐱 Gato
+                        </button>
+                      </div>
+                    </div>
                     <button
-                      onClick={() => setFormData({ ...formData, petType: 'cao' })}
-                      className={`flex-1 p-4 rounded-2xl border-2 font-bold transition-all ${formData.petType === 'cao' ? 'border-teal-500 bg-teal-50 text-teal-700' : 'border-slate-100 text-slate-500'}`}
+                      disabled={!formData.petName}
+                      onClick={() => setStep(2)}
+                      className="w-full bg-teal-600 text-white py-5 rounded-2xl font-bold text-lg hover:bg-teal-700 shadow-xl disabled:opacity-50"
                     >
-                      🐶 Cão
-                    </button>
-                    <button
-                      onClick={() => setFormData({ ...formData, petType: 'gato' })}
-                      className={`flex-1 p-4 rounded-2xl border-2 font-bold transition-all ${formData.petType === 'gato' ? 'border-teal-500 bg-teal-50 text-teal-700' : 'border-slate-100 text-slate-500'}`}
-                    >
-                      🐱 Gato
+                      Continuar
                     </button>
                   </div>
-                </div>
-                <button
-                  disabled={!formData.petName}
-                  onClick={() => setStep(2)}
-                  className="w-full bg-teal-600 text-white py-5 rounded-2xl font-bold text-lg hover:bg-teal-700 shadow-xl disabled:opacity-50"
-                >
-                  Continuar
-                </button>
+                )}
               </div>
             ) : step === 2 ? (
               <div className="space-y-6">
                 <div>
-                  <label className="block text-sm font-bold text-slate-700 mb-2">Escolha o serviço</label>
+                  <label className="block text-sm font-bold text-slate-700 mb-2 uppercase tracking-wider">Serviço para {formData.petName}</label>
                   <select
                     value={formData.type}
                     onChange={(e) => setFormData({ ...formData, type: e.target.value })}
-                    className="w-full px-4 py-4 rounded-2xl border border-slate-200 outline-none focus:ring-2 focus:ring-teal-500 appearance-none bg-white"
+                    className="w-full px-4 py-4 rounded-2xl border border-slate-200 outline-none focus:ring-2 focus:ring-teal-500 appearance-none bg-white font-bold text-slate-700"
                   >
-                    <option value="consulta-geral">Consulta Geral</option>
-                    <option value="vacinacao">Vacinação</option>
-                    <option value="exames">Exames de Sangue</option>
-                    <option value="emergencia">Emergência</option>
+                    <option value="consulta-geral">🏥 Consulta Geral</option>
+                    <option value="vacinacao">💉 Vacinação</option>
+                    <option value="exames">🧪 Exames de Sangue</option>
+                    <option value="emergencia">🚨 Emergência</option>
                   </select>
                 </div>
                 <div className="grid grid-cols-2 gap-4">
@@ -668,7 +841,7 @@ const AppointmentView: React.FC = () => {
                   <button
                     disabled={!formData.date || !formData.time}
                     onClick={() => setStep(3)}
-                    className="flex-[2] bg-teal-600 text-white py-4 rounded-2xl font-bold shadow-xl"
+                    className="flex-[2] bg-teal-600 text-white py-4 rounded-2xl font-bold shadow-xl shadow-teal-500/20"
                   >
                     Confirmar Agendamento
                   </button>
@@ -676,16 +849,16 @@ const AppointmentView: React.FC = () => {
               </div>
             ) : (
               <div className="text-center py-8 space-y-6">
-                <div className="w-20 h-20 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto mb-4">
-                  <ShieldCheck size={40} />
+                <div className="w-24 h-24 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto mb-4 border-4 border-emerald-50">
+                  <ShieldCheck size={48} />
                 </div>
-                <h3 className="text-2xl font-bold">Agendamento Realizado!</h3>
-                <p className="text-slate-600 leading-relaxed">
-                  Tudo pronto para recebermos o(a) <span className="font-bold text-teal-600">{formData.petName}</span> no dia <span className="font-bold">{formData.date}</span> às <span className="font-bold">{formData.time}</span>.
+                <h3 className="text-3xl font-black text-slate-900 leading-tight">Agendamento Realizado!</h3>
+                <p className="text-slate-600 leading-relaxed text-lg">
+                  Tudo pronto para recebermos o(a) <span className="font-black text-teal-600">{formData.petName}</span> no dia <span className="font-black text-slate-900">{new Date(formData.date).toLocaleDateString('pt-BR')}</span> às <span className="font-black text-slate-900">{formData.time}</span>.
                 </p>
-                <div className="p-6 bg-slate-50 rounded-2xl text-left text-sm space-y-2">
-                  <p>• Traga a carteirinha de vacinação se for a primeira vez.</p>
-                  <p>• Chegue com 10 minutos de antecedência.</p>
+                <div className="p-6 bg-slate-50 rounded-[32px] text-left text-sm space-y-3 border border-slate-100">
+                  <p className="flex items-center gap-2"><span className="w-1.5 h-1.5 bg-teal-500 rounded-full"></span> Traga a carteirinha de vacinação.</p>
+                  <p className="flex items-center gap-2"><span className="w-1.5 h-1.5 bg-teal-500 rounded-full"></span> Chegue com 10 minutos de antecedência.</p>
                 </div>
                 <button onClick={() => setStep(1)} className="text-teal-600 font-bold hover:underline">Realizar outro agendamento</button>
               </div>
@@ -806,54 +979,274 @@ const ContactView: React.FC = () => (
   </div>
 );
 
-const ProfileView: React.FC<{ user: User | null, onLogout: () => void }> = ({ user, onLogout }) => (
-  <div className="py-20 animate-fadeIn">
-    <div className="container mx-auto px-4 max-w-5xl">
-      <div className="grid lg:grid-cols-4 gap-8">
-        <aside className="lg:col-span-1">
-          <div className="bg-white rounded-3xl border border-slate-100 p-8 shadow-sm text-center">
-            <div className="w-24 h-24 bg-teal-100 text-teal-600 rounded-full flex items-center justify-center text-4xl font-black mx-auto mb-4">
-              {user?.name.charAt(0)}
-            </div>
-            <h3 className="text-xl font-bold">{user?.name}</h3>
-            <p className="text-slate-500 text-sm mb-6">{user?.email}</p>
-            <div className="space-y-2">
-              <button className="w-full flex items-center gap-3 px-4 py-3 bg-teal-50 text-teal-700 rounded-xl font-bold"><UserIcon size={18} /> Perfil</button>
-              <button className="w-full flex items-center gap-3 px-4 py-3 text-slate-600 hover:bg-slate-50 rounded-xl font-medium"><Package size={18} /> Pedidos</button>
-              <button className="w-full flex items-center gap-3 px-4 py-3 text-slate-600 hover:bg-slate-50 rounded-xl font-medium"><Calendar size={18} /> Agendamentos</button>
-              <button className="w-full flex items-center gap-3 px-4 py-3 text-slate-600 hover:bg-slate-50 rounded-xl font-medium"><Settings size={18} /> Configurações</button>
-              <button onClick={onLogout} className="w-full flex items-center gap-3 px-4 py-3 text-red-500 hover:bg-red-50 rounded-xl font-bold mt-4 border-t border-slate-50"><LogOut size={18} /> Sair</button>
-            </div>
-          </div>
-        </aside>
+const ProfileView: React.FC<{
+  user: User | null,
+  onLogout: () => void,
+  onDeleteAccount: () => Promise<void>,
+  onAddPet: (pet: { name: string, breed: string, type: string }) => Promise<void>
+}> = ({ user, onLogout, onDeleteAccount, onAddPet }) => {
+  const [activeTab, setActiveTab] = useState<'profile' | 'pets' | 'orders' | 'appointments' | 'payments' | 'settings'>('profile');
+  const [isEditing, setIsEditing] = useState(false);
+  const [isAddingPet, setIsAddingPet] = useState(false);
+  const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
 
-        <div className="lg:col-span-3 space-y-8">
+  const renderTabContent = () => {
+    switch (activeTab) {
+      case 'profile':
+        return (
           <div className="bg-white rounded-3xl border border-slate-100 p-8 shadow-sm">
             <h2 className="text-2xl font-bold mb-8">Dados Pessoais</h2>
             <div className="grid md:grid-cols-2 gap-8">
               <div><p className="text-xs text-slate-400 font-bold uppercase mb-1">Nome Completo</p><p className="font-bold text-slate-800">{user?.name}</p></div>
               <div><p className="text-xs text-slate-400 font-bold uppercase mb-1">E-mail</p><p className="font-bold text-slate-800">{user?.email}</p></div>
-              <div><p className="text-xs text-slate-400 font-bold uppercase mb-1">Telefone</p><p className="font-bold text-slate-800">{user?.phone}</p></div>
+              <div><p className="text-xs text-slate-400 font-bold uppercase mb-1">Telefone</p><p className="font-bold text-slate-800">{user?.phone || 'Não informado'}</p></div>
               <div><p className="text-xs text-slate-400 font-bold uppercase mb-1">Endereço Principal</p><p className="font-bold text-slate-800">Não cadastrado</p></div>
             </div>
-            <button className="mt-10 bg-slate-900 text-white px-8 py-3 rounded-xl font-bold hover:bg-slate-800 transition-colors">Editar Perfil</button>
+            <button onClick={() => setIsEditing(true)} className="mt-10 bg-slate-900 text-white px-8 py-3 rounded-xl font-bold hover:bg-slate-800 transition-colors">Editar Perfil</button>
           </div>
-
+        );
+      case 'pets':
+        return (
           <div className="bg-white rounded-3xl border border-slate-100 p-8 shadow-sm">
             <div className="flex justify-between items-center mb-8">
               <h2 className="text-2xl font-bold">Meus Pets</h2>
-              <button className="text-teal-600 font-bold flex items-center gap-1">+ Adicionar</button>
+              <button
+                onClick={() => setIsAddingPet(true)}
+                className="bg-teal-600 text-white px-4 py-2 rounded-xl text-sm font-bold flex items-center gap-1 hover:bg-teal-700 transition-all"
+              >
+                + Adicionar Pet
+              </button>
             </div>
-            <div className="text-center py-12 border-2 border-dashed border-slate-100 rounded-[32px]">
-              <div className="w-16 h-16 bg-slate-50 text-slate-300 rounded-full flex items-center justify-center mx-auto mb-4"><PawPrint size={32} /></div>
-              <p className="text-slate-500">Nenhum pet cadastrado ainda.</p>
-              <p className="text-xs text-slate-400">Cadastre seu pet para agendamentos mais rápidos!</p>
+
+            {isAddingPet && (
+              <form
+                className="bg-slate-50 p-6 rounded-[32px] border border-slate-200 mb-8 animate-fadeIn"
+                onSubmit={async (e) => {
+                  e.preventDefault();
+                  const formData = new FormData(e.currentTarget);
+                  const name = formData.get('petName') as string;
+                  const breed = formData.get('petBreed') as string;
+                  const type = formData.get('petType') as string;
+
+                  await onAddPet({ name, breed, type });
+                  setIsAddingPet(false);
+                }}
+              >
+                <div className="grid md:grid-cols-2 gap-4">
+                  <input name="petName" type="text" placeholder="Nome do Pet" className="w-full px-4 py-3 rounded-xl border border-slate-200 outline-none focus:ring-2 focus:ring-teal-500" required />
+                  <input name="petBreed" type="text" placeholder="Raça" className="w-full px-4 py-3 rounded-xl border border-slate-200 outline-none focus:ring-2 focus:ring-teal-500" required />
+                  <select name="petType" className="w-full px-4 py-3 rounded-xl border border-slate-200 outline-none focus:ring-2 focus:ring-teal-500 bg-white">
+                    <option value="cao">Cão</option>
+                    <option value="gato">Gato</option>
+                    <option value="outros">Outros</option>
+                  </select>
+                  <div className="flex gap-2">
+                    <button type="submit" className="flex-1 bg-teal-600 text-white py-3 rounded-xl font-bold hover:bg-teal-700 transition-all shadow-lg active:scale-95">Salvar Pet</button>
+                    <button type="button" onClick={() => setIsAddingPet(false)} className="flex-1 bg-white text-slate-500 border border-slate-200 rounded-xl font-bold hover:bg-slate-50 transition-all">Cancelar</button>
+                  </div>
+                </div>
+              </form>
+            )}
+
+            {user?.pets && user.pets.length > 0 ? (
+              <div className="grid sm:grid-cols-2 gap-4">
+                {user.pets.map((pet, idx) => (
+                  <div key={idx} className="flex items-center gap-4 bg-slate-50 p-4 rounded-2xl border border-slate-100 group hover:border-teal-100 transition-all">
+                    <div className="w-12 h-12 bg-white rounded-xl flex items-center justify-center text-teal-600 shadow-sm group-hover:bg-teal-600 group-hover:text-white transition-all">
+                      <PawPrint size={24} />
+                    </div>
+                    <div>
+                      <h4 className="font-bold text-slate-800">{pet.name}</h4>
+                      <p className="text-xs text-slate-500 text-capitalize">{pet.type} • {pet.breed}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="text-center py-12 border-2 border-dashed border-slate-100 rounded-[32px]">
+                <div className="w-16 h-16 bg-slate-50 text-slate-300 rounded-full flex items-center justify-center mx-auto mb-4"><PawPrint size={32} /></div>
+                <p className="text-slate-500">Nenhum pet cadastrado ainda.</p>
+                <p className="text-xs text-slate-400">Cadastre seu pet para usá-lo em compras e agendamentos!</p>
+              </div>
+            )}
+          </div>
+        );
+      case 'orders':
+        return (
+          <div className="bg-white rounded-3xl border border-slate-100 p-8 shadow-sm">
+            <h2 className="text-2xl font-bold mb-8">Meus Pedidos</h2>
+            <div className="text-center py-12">
+              <Package size={48} className="mx-auto text-slate-200 mb-4" />
+              <p className="text-slate-500">Você ainda não realizou nenhum pedido.</p>
             </div>
+          </div>
+        );
+      case 'appointments':
+        return (
+          <div className="bg-white rounded-3xl border border-slate-100 p-8 shadow-sm">
+            <h2 className="text-2xl font-bold mb-8">Meus Agendamentos</h2>
+            <div className="text-center py-12">
+              <Calendar size={48} className="mx-auto text-slate-200 mb-4" />
+              <p className="text-slate-500">Nenhum agendamento encontrado.</p>
+            </div>
+          </div>
+        );
+      case 'payments':
+        return (
+          <div className="bg-white rounded-3xl border border-slate-100 p-8 shadow-sm">
+            <h2 className="text-2xl font-bold mb-8">Histórico de Pagamentos</h2>
+            <div className="space-y-4">
+              <div className="flex items-center justify-between p-4 bg-slate-50 rounded-2xl border border-slate-100">
+                <div className="flex items-center gap-4">
+                  <div className="w-10 h-10 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center">
+                    <ShoppingCart size={20} />
+                  </div>
+                  <div>
+                    <p className="font-bold text-slate-800">Checkout Simulado</p>
+                    <p className="text-xs text-slate-500">11/02/2026</p>
+                  </div>
+                </div>
+                <div className="text-right">
+                  <p className="font-black text-slate-900">R$ 0,00</p>
+                  <p className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest">Sincronizado</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      case 'settings':
+        return (
+          <div className="bg-white rounded-3xl border border-slate-100 p-8 shadow-sm">
+            <h2 className="text-2xl font-bold mb-8">Configurações</h2>
+            <div className="space-y-6">
+              <div className="flex items-center justify-between p-4 bg-slate-50 rounded-2xl">
+                <div>
+                  <p className="font-bold text-slate-800">Notificações por E-mail</p>
+                  <p className="text-sm text-slate-500">Receba atualizações sobre seus pedidos e agendamentos.</p>
+                </div>
+                <div className="w-12 h-6 bg-teal-600 rounded-full relative cursor-pointer">
+                  <div className="absolute right-1 top-1 w-4 h-4 bg-white rounded-full"></div>
+                </div>
+              </div>
+
+              <div className="pt-8 border-t border-red-50">
+                <h3 className="text-lg font-bold text-red-600 mb-2 font-black uppercase tracking-tighter">Zona de Perigo</h3>
+                <p className="text-sm text-slate-500 mb-4">A exclusão da conta é permanente e não pode ser desfeita.</p>
+                <button
+                  onClick={() => setIsDeleteModalOpen(true)}
+                  className="bg-red-50 text-red-600 border border-red-100 px-6 py-3 rounded-xl font-bold hover:bg-red-600 hover:text-white transition-all flex items-center gap-2"
+                >
+                  <Trash2 size={18} /> Excluir Minha Conta
+                </button>
+              </div>
+            </div>
+
+            {/* Premium Delete Account Modal */}
+            {isDeleteModalOpen && (
+              <div className="fixed inset-0 z-[200] flex items-center justify-center p-4">
+                <div
+                  className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm animate-fadeIn"
+                  onClick={() => setIsDeleteModalOpen(false)}
+                ></div>
+                <div className="bg-white w-full max-w-md p-8 rounded-[40px] relative z-10 shadow-2xl animate-scaleUp overflow-hidden">
+                  <div className="absolute top-0 left-0 w-full h-2 bg-red-500"></div>
+                  <div className="text-center space-y-6">
+                    <div className="w-20 h-20 bg-red-50 text-red-600 rounded-3xl flex items-center justify-center mx-auto mb-2 border border-red-100">
+                      <Trash2 size={40} />
+                    </div>
+                    <div>
+                      <h2 className="text-2xl font-black text-slate-900 mb-2">Excluir Conta?</h2>
+                      <p className="text-slate-500 leading-relaxed">
+                        Esta ação é <span className="text-red-600 font-bold">permanente</span>. Você perderá acesso a todos os seus pets, agendamentos e histórico de pedidos.
+                      </p>
+                    </div>
+
+                    <div className="flex flex-col gap-3">
+                      <button
+                        onClick={() => {
+                          onDeleteAccount();
+                          setIsDeleteModalOpen(false);
+                        }}
+                        className="w-full bg-red-600 text-white py-4 rounded-2xl font-bold text-lg hover:bg-red-700 shadow-xl shadow-red-200 transition-all active:scale-95"
+                      >
+                        Sim, Excluir Conta
+                      </button>
+                      <button
+                        onClick={() => setIsDeleteModalOpen(false)}
+                        className="w-full bg-slate-100 text-slate-600 py-4 rounded-2xl font-bold hover:bg-slate-200 transition-all"
+                      >
+                        Não, mudei de ideia
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        );
+    }
+  };
+
+  return (
+    <div className="py-20 animate-fadeIn">
+      <div className="container mx-auto px-4 max-w-5xl">
+        <div className="grid lg:grid-cols-4 gap-8">
+          <aside className="lg:col-span-1">
+            <div className="bg-white rounded-3xl border border-slate-100 p-8 shadow-sm text-center">
+              <div className="w-24 h-24 bg-teal-100 text-teal-600 rounded-full flex items-center justify-center text-4xl font-black mx-auto mb-4">
+                {user?.name.charAt(0)}
+              </div>
+              <h3 className="text-xl font-bold">{user?.name}</h3>
+              <p className="text-slate-500 text-sm mb-6">{user?.email}</p>
+              <div className="space-y-2">
+                <button
+                  onClick={() => setActiveTab('profile')}
+                  className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl font-bold transition-all ${activeTab === 'profile' ? 'bg-teal-50 text-teal-700' : 'text-slate-600 hover:bg-slate-50'}`}
+                >
+                  <UserIcon size={18} /> Perfil
+                </button>
+                <button
+                  onClick={() => setActiveTab('pets')}
+                  className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl font-bold transition-all ${activeTab === 'pets' ? 'bg-teal-50 text-teal-700' : 'text-slate-600 hover:bg-slate-50'}`}
+                >
+                  <PawPrint size={18} /> Meus Pets
+                </button>
+                <button
+                  onClick={() => setActiveTab('orders')}
+                  className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl font-bold transition-all ${activeTab === 'orders' ? 'bg-teal-50 text-teal-700' : 'text-slate-600 hover:bg-slate-50'}`}
+                >
+                  <Package size={18} /> Pedidos
+                </button>
+                <button
+                  onClick={() => setActiveTab('appointments')}
+                  className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl font-bold transition-all ${activeTab === 'appointments' ? 'bg-teal-50 text-teal-700' : 'text-slate-600 hover:bg-slate-50'}`}
+                >
+                  <Calendar size={18} /> Agendamentos
+                </button>
+                <button
+                  onClick={() => setActiveTab('payments')}
+                  className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl font-bold transition-all ${activeTab === 'payments' ? 'bg-teal-50 text-teal-700' : 'text-slate-600 hover:bg-slate-50'}`}
+                >
+                  <ShoppingCart size={18} /> Pagamentos
+                </button>
+                <button
+                  onClick={() => setActiveTab('settings')}
+                  className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl font-bold transition-all ${activeTab === 'settings' ? 'bg-teal-50 text-teal-700' : 'text-slate-600 hover:bg-slate-50'}`}
+                >
+                  <Settings size={18} /> Configurações
+                </button>
+                <button onClick={onLogout} className="w-full flex items-center gap-3 px-4 py-3 text-red-500 hover:bg-red-50 rounded-xl font-bold mt-4 border-t border-slate-50"><LogOut size={18} /> Sair</button>
+              </div>
+            </div>
+          </aside>
+
+          <div className="lg:col-span-3 space-y-8">
+            {renderTabContent()}
           </div>
         </div>
       </div>
     </div>
-  </div>
-);
+  );
+};
 
 export default App;
