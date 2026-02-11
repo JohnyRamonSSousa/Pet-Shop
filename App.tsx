@@ -1235,7 +1235,12 @@ const ProfileView: React.FC<{
                 >
                   <Settings size={18} /> Configurações
                 </button>
-                <button onClick={onLogout} className="w-full flex items-center gap-3 px-4 py-3 text-red-500 hover:bg-red-50 rounded-xl font-bold mt-4 border-t border-slate-50"><LogOut size={18} /> Sair</button>
+                <button
+                  onClick={onLogout}
+                  className="w-full flex items-center gap-3 px-4 py-3 text-red-500 hover:bg-red-50 rounded-xl font-bold mt-4 border-t border-slate-50"
+                >
+                  <LogOut size={18} /> Sair do Dashboard
+                </button>
               </div>
             </div>
           </aside>
