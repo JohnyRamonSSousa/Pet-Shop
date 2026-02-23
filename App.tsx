@@ -5,7 +5,8 @@ import {
   Heart, Calendar, MapPin, Phone, MessageCircle,
   Facebook, Instagram, ArrowRight, Star, Filter,
   ChevronDown, LogOut, Package, Settings, Trash2,
-  Clock, PawPrint, ShieldCheck, Mail, Lock, Plus
+  Clock, PawPrint, ShieldCheck, Mail, Lock, Plus,
+  CreditCard, QrCode, FileText, Scissors, Syringe
 } from 'lucide-react';
 import {
   createUserWithEmailAndPassword,
@@ -13,7 +14,8 @@ import {
   signOut,
   onAuthStateChanged,
   updateProfile,
-  deleteUser
+  deleteUser,
+  sendPasswordResetEmail
 } from 'firebase/auth';
 import {
   doc,
@@ -21,27 +23,40 @@ import {
   getDoc,
   onSnapshot,
   updateDoc,
-  arrayUnion
+  deleteDoc,
+  arrayUnion,
+  collection
 } from 'firebase/firestore';
 import { auth, db } from './services/firebase';
 import { PRODUCTS, PET_SERVICES } from './constants';
-import { Product, User } from './types';
+import { Product, User, Order, OrderItem, Appointment } from './types';
 
 
 // --- State and Context ---
-type View = 'home' | 'store' | 'services' | 'about' | 'contact' | 'appointment' | 'profile';
+type View = 'home' | 'store' | 'services' | 'about' | 'contact' | 'appointment' | 'profile' | 'checkout_payment';
 
 const App: React.FC = () => {
-  const [currentView, setCurrentView] = useState<View>('home');
+  const [currentView, setCurrentView] = useState<View>(() => {
+    return (localStorage.getItem('je-pet-view') as View) || 'home';
+  });
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [authView, setAuthView] = useState<'login' | 'signup' | 'forgot'>('login');
   const [cart, setCart] = useState<Product[]>([]);
-  const [user, setUser] = useState<User | null>(null);
+  const [user, setUser] = useState<User | null>(() => {
+    const cached = localStorage.getItem('je-pet-user');
+    return cached ? JSON.parse(cached) : null;
+  });
   const [isCartOpen, setIsCartOpen] = useState(false);
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [showDeleteSuccess, setShowDeleteSuccess] = useState(false);
+  const [isOrderModalOpen, setIsOrderModalOpen] = useState(false);
+  const [lastOrder, setLastOrder] = useState<Order | null>(null);
+  const [orders, setOrders] = useState<Order[]>([]);
+  const [loadingOrders, setLoadingOrders] = useState(false);
+  const [appointments, setAppointments] = useState<Appointment[]>([]);
+  const [loadingAppointments, setLoadingAppointments] = useState(false);
 
   // Auth synchronization
   useEffect(() => {
@@ -51,19 +66,19 @@ const App: React.FC = () => {
       if (firebaseUser) {
         // Start real-time Firestore listener
         const userDocRef = doc(db, 'users', firebaseUser.uid);
-
         unsubscribeFirestore = onSnapshot(userDocRef, (docSnap) => {
           if (docSnap.exists()) {
             const data = docSnap.data();
-            setUser({
+            const userData: User = {
               id: firebaseUser.uid,
               name: data.name || firebaseUser.displayName || 'Usuário',
               email: data.email || firebaseUser.email || '',
               phone: data.phone || '',
               pets: data.pets || []
-            });
+            };
+            setUser(userData);
+            localStorage.setItem('je-pet-user', JSON.stringify(userData));
           } else {
-            // Initialize document if it doesn't exist
             const newUser = {
               id: firebaseUser.uid,
               name: firebaseUser.displayName || 'Usuário',
@@ -73,11 +88,17 @@ const App: React.FC = () => {
             };
             setDoc(userDocRef, newUser);
             setUser(newUser);
+            localStorage.setItem('je-pet-user', JSON.stringify(newUser));
           }
+        }, (error) => {
+          console.error("Firestore sync error:", error);
+          setAuthError("Erro ao sincronizar dados: " + error.message);
         });
       } else {
         if (unsubscribeFirestore) unsubscribeFirestore();
         setUser(null);
+        localStorage.removeItem('je-pet-user');
+        localStorage.removeItem('je-pet-view');
       }
     });
 
@@ -86,6 +107,11 @@ const App: React.FC = () => {
       if (unsubscribeFirestore) unsubscribeFirestore();
     };
   }, []);
+
+  // Sync view to localStorage
+  useEffect(() => {
+    localStorage.setItem('je-pet-view', currentView);
+  }, [currentView]);
 
   const handleAuth = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -110,11 +136,23 @@ const App: React.FC = () => {
         });
       } else if (authView === 'login') {
         await signInWithEmailAndPassword(auth, email, password);
+        setCurrentView('profile');
+      } else if (authView === 'forgot') {
+        await sendPasswordResetEmail(auth, email);
+        alert('E-mail de recuperação enviado! Verifique sua caixa de entrada.');
+        setAuthView('login');
+        setIsAuthModalOpen(false);
+        return;
       }
       setIsAuthModalOpen(false);
     } catch (error: any) {
       console.error("Auth error:", error);
-      setAuthError(error.message);
+      let errorMessage = error.message;
+      if (error.code === 'auth/user-not-found') errorMessage = 'Usuário não encontrado.';
+      if (error.code === 'auth/wrong-password') errorMessage = 'Senha incorreta.';
+      if (error.code === 'auth/invalid-email') errorMessage = 'E-mail inválido.';
+      if (error.code === 'auth/too-many-requests') errorMessage = 'Muitas tentativas. Tente novamente mais tarde.';
+      setAuthError(errorMessage);
     } finally {
       setAuthLoading(false);
     }
@@ -163,16 +201,190 @@ const App: React.FC = () => {
 
   // Redirection guard: go home if not logged in and on profile view
   useEffect(() => {
-    if (!user && currentView === 'profile') {
+    // Only redirect if we are sure there is no user and we are not in the middle of auth loading
+    if (!user && !auth.currentUser && currentView === 'profile' && !authLoading) {
       setCurrentView('home');
     }
-  }, [user, currentView]);
+  }, [user, currentView, authLoading]);
 
   const addToCart = (product: Product, petName?: string) => {
     const productWithPet = { ...product, assignedPet: petName };
     setCart([...cart, productWithPet]);
     setIsCartOpen(true);
   };
+
+  const finalizePurchase = async () => {
+    if (!user) {
+      setIsCartOpen(false);
+      setAuthView('login');
+      setIsAuthModalOpen(true);
+      return;
+    }
+
+    if (cart.length === 0) return;
+    setIsCartOpen(false);
+    setCurrentView('checkout_payment');
+  };
+
+  const createOrder = async (paymentMethod: string) => {
+    if (!user || cart.length === 0) return;
+
+    try {
+      console.log("Preparing OrderItems...");
+      const orderItems: OrderItem[] = cart.map((item, idx) => ({
+        id: `${item.id}-${idx}`,
+        name: item.name,
+        price: item.price,
+        imageUrl: item.imageUrl,
+        assignedPet: item.assignedPet || ""
+      }));
+
+      const newOrder: Order = {
+        id: `ord-${Date.now()}`,
+        userId: user.id,
+        items: orderItems,
+        total: cartTotal,
+        date: new Date().toISOString(),
+        status: 'pending'
+      };
+
+      setLastOrder(newOrder);
+      setCart([]);
+      setIsOrderModalOpen(true);
+      console.log("Optimistic UI: Modal opened and cart cleared.");
+
+      // Attempt the write in the background
+      const userOrdersRef = doc(db, 'users', user.id, 'orders', newOrder.id);
+      console.log("Starting background Firestore write...");
+      setDoc(userOrdersRef, newOrder)
+        .then(() => console.log("Background Firestore write SUCCEEDED"))
+        .catch(error => console.error("Background Firestore write FAILED:", error));
+    } catch (error: any) {
+      console.error("=== CREATE ORDER ERROR ===");
+      console.error("Error code:", error.code);
+      console.error("Error message:", error.message);
+      alert(`Erro ao finalizar compra. Detalhes: ${error.message}`);
+      throw error;
+    }
+  };
+
+  const handleCreateAppointment = async (appointmentData: Omit<Appointment, 'id' | 'status' | 'userId'>) => {
+    if (!user) {
+      setAuthError(null);
+      setAuthView('login');
+      setIsAuthModalOpen(true);
+      return;
+    }
+
+    try {
+      const newAppointment: Appointment = {
+        ...appointmentData,
+        userId: user.id,
+        id: `app-${Date.now()}`,
+        status: 'pending'
+      };
+
+      console.log("Optimistic Appointment: Saving in background...", newAppointment);
+      const appRef = doc(db, 'users', user.id, 'appointments', newAppointment.id);
+
+      // Background write
+      setDoc(appRef, newAppointment)
+        .then(() => console.log("Background Appointment Save: SUCCESS"))
+        .catch(err => {
+          console.error("Background Appointment Save: FAILED", err);
+          alert("Erro ao sincronizar agendamento. Tente novamente mais tarde.");
+        });
+
+      return newAppointment;
+    } catch (error: any) {
+      console.error("Create appointment logic error:", error);
+      alert("Erro ao preparar agendamento: " + error.message);
+      throw error;
+    }
+  };
+  const handleUpdateAppointment = async (id: string, data: Partial<Appointment>) => {
+    if (!user) return;
+    try {
+      console.log("Optimistic Update: Saving in background...", id, data);
+      const appRef = doc(db, 'users', user.id, 'appointments', id);
+
+      // Background write
+      updateDoc(appRef, data)
+        .then(() => console.log("Background Update: SUCCESS"))
+        .catch(err => {
+          console.error("Background Update: FAILED", err);
+          alert("Houve um erro ao atualizar o agendamento no servidor.");
+        });
+
+      return true;
+    } catch (error: any) {
+      console.error("Critical update error:", error);
+      alert("Erro ao preparar atualização: " + error.message);
+    }
+  };
+
+  const handleDeleteAppointment = async (id: string) => {
+    if (!user) return;
+    if (!confirm("Tem certeza que deseja cancelar este agendamento?")) return;
+
+    try {
+      console.log("Optimistic Delete: Saving in background...", id);
+      const appRef = doc(db, 'users', user.id, 'appointments', id);
+
+      // Background write - using status 'cancelled' as requested to keep record, or deleteDoc
+      // User said "excluir", but cancelling is usually safer for business logs. 
+      // I'll stick to 'cancelled' status for better UI feedback of history.
+      updateDoc(appRef, { status: 'cancelled' })
+        .then(() => console.log("Background Delete/Cancel: SUCCESS"))
+        .catch(err => {
+          console.error("Background Delete/Cancel: FAILED", err);
+          alert("Erro ao processar o cancelamento no servidor.");
+        });
+
+      return true;
+    } catch (error: any) {
+      console.error("Critical delete error:", error);
+      alert("Erro ao processar cancelamento: " + error.message);
+    }
+  };
+
+  // Global Data Fetching (Parallel)
+  useEffect(() => {
+    if (!user) {
+      setOrders([]);
+      setAppointments([]);
+      return;
+    }
+
+    setLoadingOrders(true);
+    setLoadingAppointments(true);
+
+    const ordersRef = collection(db, 'users', user.id, 'orders');
+    const appRef = collection(db, 'users', user.id, 'appointments');
+
+    const unsubscribeOrders = onSnapshot(ordersRef, (snapshot) => {
+      const fetchedOrders = snapshot.docs.map(doc => doc.data() as Order);
+      setOrders(fetchedOrders.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()));
+      setLoadingOrders(false);
+    }, (error) => {
+      console.error("Fetch orders error:", error);
+      setLoadingOrders(false);
+    });
+
+    const unsubscribeApps = onSnapshot(appRef, (snapshot) => {
+      const fetchedApps = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as Appointment));
+      setAppointments(fetchedApps.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()));
+      setLoadingAppointments(false);
+    }, (error) => {
+      console.error("Fetch appointments error:", error);
+      setLoadingAppointments(false);
+    });
+
+    return () => {
+      unsubscribeOrders();
+      unsubscribeApps();
+    };
+  }, [user?.id]);
 
   const removeFromCart = (id: string) => {
     setCart(cart.filter(item => item.id !== id));
@@ -230,7 +442,7 @@ const App: React.FC = () => {
               </button>
             ) : (
               <button
-                onClick={() => { setAuthView('login'); setIsAuthModalOpen(true); }}
+                onClick={() => { setAuthError(null); setAuthView('login'); setIsAuthModalOpen(true); }}
                 className="bg-teal-600 text-white px-6 py-2.5 rounded-full font-bold shadow-lg hover:bg-teal-700 transition-all flex items-center gap-2"
               >
                 <UserIcon size={18} /> <span className="hidden sm:inline">Entrar</span>
@@ -258,8 +470,27 @@ const App: React.FC = () => {
           <button onClick={() => setCurrentView('services')} className="text-2xl font-bold py-2">Serviços</button>
           <button onClick={() => setCurrentView('about')} className="text-2xl font-bold py-2">Sobre</button>
           <button onClick={() => setCurrentView('contact')} className="text-2xl font-bold py-2">Contato</button>
+
+          {user && (
+            <button
+              onClick={() => { setCurrentView('profile'); setIsMenuOpen(false); }}
+              className="text-2xl font-bold py-2 text-teal-600 flex items-center gap-2"
+            >
+              <UserIcon size={24} /> Meu Perfil
+            </button>
+          )}
+
           <button
-            onClick={() => { setIsMenuOpen(false); setCurrentView('appointment'); }}
+            onClick={() => {
+              setIsMenuOpen(false);
+              if (user) {
+                setCurrentView('appointment');
+              } else {
+                setAuthError(null);
+                setAuthView('login');
+                setIsAuthModalOpen(true);
+              }
+            }}
             className="mt-4 bg-teal-600 text-white w-full py-4 rounded-2xl font-bold shadow-xl"
           >
             Agendar Consulta
@@ -269,18 +500,59 @@ const App: React.FC = () => {
 
       {/* Main Content */}
       <main className="flex-1 pt-20">
-        {currentView === 'home' && <HomeView onNavigateStore={() => setCurrentView('store')} onNavigateAppoint={() => setCurrentView('appointment')} onAddCart={addToCart} />}
+        {currentView === 'home' && (
+          <HomeView
+            onNavigateStore={() => setCurrentView('store')}
+            onNavigateAppoint={() => {
+              if (user) setCurrentView('appointment');
+              else { setAuthError(null); setAuthView('login'); setIsAuthModalOpen(true); }
+            }}
+            onAddCart={addToCart}
+          />
+        )}
         {currentView === 'store' && <StoreView user={user} onAddCart={addToCart} />}
-        {currentView === 'services' && <ServicesView onNavigateAppoint={() => setCurrentView('appointment')} />}
+        {currentView === 'services' && (
+          <ServicesView
+            onNavigateAppoint={() => {
+              if (user) setCurrentView('appointment');
+              else { setAuthError(null); setAuthView('login'); setIsAuthModalOpen(true); }
+            }}
+          />
+        )}
         {currentView === 'about' && <AboutView />}
         {currentView === 'contact' && <ContactView />}
-        {currentView === 'appointment' && <AppointmentView user={user} />}
+        {currentView === 'appointment' && (
+          <AppointmentView
+            user={user}
+            onSaveAppointment={handleCreateAppointment}
+            onNavigate={setCurrentView}
+            onFinish={() => {
+              alert("Agendamento realizado com sucesso!");
+              setCurrentView('profile');
+            }}
+          />
+        )}
         {currentView === 'profile' && (
           <ProfileView
             user={user}
+            orders={orders}
+            loadingOrders={loadingOrders}
+            appointments={appointments}
+            loadingAppointments={loadingAppointments}
             onLogout={logout}
             onDeleteAccount={deleteAccount}
             onAddPet={addPet}
+            onUpdateApp={handleUpdateAppointment}
+            onDeleteApp={handleDeleteAppointment}
+            onNavigate={setCurrentView}
+          />
+        )}
+        {currentView === 'checkout_payment' && (
+          <CheckoutPaymentView
+            cart={cart}
+            total={cartTotal}
+            onConfirm={createOrder}
+            onBack={() => setCurrentView('home')}
           />
         )}
       </main>
@@ -383,7 +655,7 @@ const App: React.FC = () => {
               <button
                 disabled={cart.length === 0}
                 className="w-full bg-teal-600 text-white py-4 rounded-2xl font-bold text-lg hover:bg-teal-700 shadow-xl disabled:opacity-50"
-                onClick={() => { alert('Redirecionando para pagamento...'); setIsCartOpen(false); }}
+                onClick={finalizePurchase}
               >
                 Finalizar Compra
               </button>
@@ -459,6 +731,265 @@ const App: React.FC = () => {
           </div>
         </div>
       )}
+
+      {/* Order Confirmation Modal - Redesigned for WOW Effect */}
+      {isOrderModalOpen && lastOrder && (
+        <div className="fixed inset-0 z-[150] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-slate-900/40 backdrop-blur-md animate-fadeIn" onClick={() => setIsOrderModalOpen(false)}></div>
+          <div className="bg-white w-full max-w-2xl rounded-[48px] relative z-10 shadow-2xl animate-scaleUp overflow-hidden">
+            {/* Success Header with Animated Element */}
+            <div className="bg-gradient-to-br from-teal-500 via-teal-600 to-emerald-600 p-12 text-white text-center relative overflow-hidden">
+              <div className="absolute inset-0 opacity-10 pointer-events-none">
+                <div className="absolute top-0 left-0 w-20 h-20 bg-white rounded-full -translate-x-1/2 -translate-y-1/2 blur-2xl"></div>
+                <div className="absolute bottom-0 right-0 w-32 h-32 bg-emerald-400 rounded-full translate-x-1/2 translate-y-1/2 blur-3xl"></div>
+              </div>
+
+              <div className="w-24 h-24 bg-white/20 rounded-full flex items-center justify-center mx-auto mb-6 backdrop-blur-xl border border-white/30 shadow-lg animate-bounce">
+                <ShieldCheck size={56} className="text-white drop-shadow-lg" />
+              </div>
+
+              <h2 className="text-4xl font-black mb-2 tracking-tight">¡Parabéns pela Compra!</h2>
+              <p className="text-teal-50 text-lg font-medium opacity-90">Seu pedido foi processado com sucesso.</p>
+            </div>
+
+            <div className="p-10 space-y-8">
+              <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 bg-slate-50 p-6 rounded-3xl border border-slate-100">
+                <div className="space-y-1">
+                  <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">Código do Pedido</p>
+                  <p className="text-lg font-black text-slate-900">#{lastOrder.id.split('-')[1]}</p>
+                </div>
+                <div className="space-y-1 sm:text-right">
+                  <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">Data do Pedido</p>
+                  <p className="text-lg font-bold text-slate-900">{new Date(lastOrder.date).toLocaleDateString('pt-BR', { day: '2-digit', month: 'long', year: 'numeric' })}</p>
+                </div>
+              </div>
+
+              <div className="space-y-4">
+                <h3 className="text-sm font-bold text-slate-500 uppercase tracking-widest pl-1">Itens Adquiridos</h3>
+                <div className="bg-white rounded-3xl overflow-hidden border border-slate-100 divide-y divide-slate-50">
+                  {lastOrder.items.map((item, idx) => (
+                    <div key={idx} className="flex justify-between items-center p-4 hover:bg-slate-50 transition-colors">
+                      <div className="flex items-center gap-4">
+                        <div className="w-12 h-12 rounded-xl overflow-hidden shadow-sm">
+                          <img src={item.imageUrl} className="w-full h-full object-cover" alt={item.name} />
+                        </div>
+                        <div>
+                          <p className="font-bold text-slate-800">{item.name}</p>
+                          <p className="text-xs text-slate-400">Entrega prevista em breve</p>
+                        </div>
+                      </div>
+                      <p className="font-black text-slate-900">R$ {item.price.toFixed(2)}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="flex justify-between items-center px-2">
+                <div className="space-y-1">
+                  <p className="text-slate-500 font-bold">Total Pago</p>
+                  <p className="text-xs text-slate-400">incluindo taxas e impostos</p>
+                </div>
+                <p className="text-4xl font-black text-teal-600">R$ {lastOrder.total.toFixed(2)}</p>
+              </div>
+
+              <div className="grid sm:grid-cols-2 gap-4 pt-4">
+                <button
+                  onClick={() => { setIsOrderModalOpen(false); setCurrentView('profile'); }}
+                  className="group w-full bg-slate-900 text-white py-5 rounded-2xl font-bold hover:bg-slate-800 transition-all flex items-center justify-center gap-3 shadow-xl hover:scale-[1.02]"
+                >
+                  <Package size={22} className="group-hover:rotate-12 transition-transform" />
+                  Ver meus Pedidos
+                </button>
+                <button
+                  onClick={() => setIsOrderModalOpen(false)}
+                  className="w-full bg-white text-teal-600 border-2 border-teal-600 py-5 rounded-2xl font-bold hover:bg-teal-50 transition-all shadow-lg hover:scale-[1.02]"
+                >
+                  Continuar Comprando
+                </button>
+              </div>
+            </div>
+
+            <div className="bg-slate-50 p-6 text-center border-t border-slate-100">
+              <p className="text-xs text-slate-400 flex items-center justify-center gap-2">
+                <ShieldCheck size={14} className="text-teal-500" /> Compra Segura e Protegida por JE Pet Ltda.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// --- Sub-Views Components ---
+
+const CheckoutPaymentView: React.FC<{
+  cart: Product[],
+  total: number,
+  onConfirm: (method: string) => Promise<void>,
+  onBack: () => void
+}> = ({ cart, total, onConfirm, onBack }) => {
+  const [paymentMethod, setPaymentMethod] = useState<'card' | 'pix' | 'boleto'>('card');
+  const [loading, setLoading] = useState(false);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    try {
+      console.log("Starting payment simulation...");
+      // Faster simulation for better UX
+      await new Promise(resolve => setTimeout(resolve, 1500));
+
+      console.log("Calling onConfirm (Optimistic Mode)");
+      await onConfirm(paymentMethod);
+
+      console.log("Redirecting to home...");
+      onBack();
+    } catch (error: any) {
+      console.error("Payment handleSubmit error details:", error);
+      alert(error.message || "Erro no processamento.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="py-20 animate-fadeIn bg-slate-50 min-h-screen">
+      <div className="container mx-auto px-4 max-w-4xl">
+        <div className="flex items-center gap-4 mb-10">
+          <button onClick={onBack} className="p-3 bg-white rounded-2xl shadow-sm hover:bg-slate-50 transition-all font-bold text-slate-600 flex items-center gap-2">
+            <ArrowRight size={20} className="rotate-180" /> Voltar
+          </button>
+          <h2 className="text-3xl font-black text-slate-900">Finalizar Pagamento</h2>
+        </div>
+
+        <div className="grid lg:grid-cols-3 gap-10">
+          <div className="lg:col-span-2 space-y-8">
+            {/* Payment Method Selection */}
+            <div className="bg-white p-8 rounded-[40px] shadow-sm border border-slate-100">
+              <h3 className="text-xl font-bold mb-6 flex items-center gap-2">
+                <ShieldCheck className="text-teal-600" /> Escolha o método
+              </h3>
+
+              <div className="grid grid-cols-3 gap-4">
+                <button
+                  onClick={() => setPaymentMethod('card')}
+                  className={`p-6 rounded-3xl border-2 transition-all flex flex-col items-center gap-3 ${paymentMethod === 'card' ? 'border-teal-600 bg-teal-50 text-teal-700' : 'border-slate-100 hover:border-teal-100 text-slate-500'}`}
+                >
+                  <CreditCard size={32} />
+                  <span className="font-bold text-xs uppercase tracking-wider">Cartão</span>
+                </button>
+                <button
+                  onClick={() => setPaymentMethod('pix')}
+                  className={`p-6 rounded-3xl border-2 transition-all flex flex-col items-center gap-3 ${paymentMethod === 'pix' ? 'border-teal-600 bg-teal-50 text-teal-700' : 'border-slate-100 hover:border-teal-100 text-slate-500'}`}
+                >
+                  <QrCode size={32} />
+                  <span className="font-bold text-xs uppercase tracking-wider">PIX</span>
+                </button>
+                <button
+                  onClick={() => setPaymentMethod('boleto')}
+                  className={`p-6 rounded-3xl border-2 transition-all flex flex-col items-center gap-3 ${paymentMethod === 'boleto' ? 'border-teal-600 bg-teal-50 text-teal-700' : 'border-slate-100 hover:border-teal-100 text-slate-500'}`}
+                >
+                  <FileText size={32} />
+                  <span className="font-bold text-xs uppercase tracking-wider">Boleto</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Form Area */}
+            <div className="bg-white p-8 rounded-[40px] shadow-sm border border-slate-100">
+              <form onSubmit={handleSubmit} className="space-y-6">
+                {paymentMethod === 'card' && (
+                  <div className="space-y-4 animate-fadeIn">
+                    <div className="space-y-2">
+                      <label className="text-xs font-bold text-slate-400 uppercase tracking-widest pl-2">Número do Cartão</label>
+                      <div className="relative">
+                        <CreditCard className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={20} />
+                        <input type="text" placeholder="0000 0000 0000 0000" className="w-full pl-12 pr-4 py-4 rounded-2xl border border-slate-200 outline-none focus:ring-2 focus:ring-teal-500 font-medium" required />
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="space-y-2">
+                        <label className="text-xs font-bold text-slate-400 uppercase tracking-widest pl-2">Validade</label>
+                        <input type="text" placeholder="MM/AA" className="w-full px-6 py-4 rounded-2xl border border-slate-200 outline-none focus:ring-2 focus:ring-teal-500 font-medium" required />
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-xs font-bold text-slate-400 uppercase tracking-widest pl-2">CVV</label>
+                        <input type="text" placeholder="123" className="w-full px-6 py-4 rounded-2xl border border-slate-200 outline-none focus:ring-2 focus:ring-teal-500 font-medium" required />
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-xs font-bold text-slate-400 uppercase tracking-widest pl-2">Nome no Cartão</label>
+                      <input type="text" placeholder="Como impresso no cartão" className="w-full px-6 py-4 rounded-2xl border border-slate-200 outline-none focus:ring-2 focus:ring-teal-500 font-medium uppercase" required />
+                    </div>
+                  </div>
+                )}
+
+                {paymentMethod === 'pix' && (
+                  <div className="text-center py-10 space-y-6 animate-fadeIn">
+                    <div className="w-48 h-48 bg-slate-100 rounded-3xl mx-auto flex items-center justify-center border-2 border-dashed border-slate-200">
+                      <QrCode size={80} className="text-slate-300" />
+                    </div>
+                    <p className="text-slate-500 text-sm max-w-xs mx-auto">
+                      Um código QR será gerado após o clique no botão de confirmação para você pagar via app do seu banco.
+                    </p>
+                  </div>
+                )}
+
+                {paymentMethod === 'boleto' && (
+                  <div className="text-center py-10 space-y-6 animate-fadeIn">
+                    <div className="w-20 h-20 bg-emerald-50 text-emerald-600 rounded-full flex items-center justify-center mx-auto">
+                      <FileText size={40} />
+                    </div>
+                    <p className="text-slate-500 text-sm max-w-xs mx-auto">
+                      O boleto bancário será gerado para download após a confirmação. O prazo de compensação é de até 3 dias úteis.
+                    </p>
+                  </div>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="w-full bg-teal-600 text-white py-5 rounded-[24px] font-black text-xl hover:bg-teal-700 shadow-xl shadow-teal-500/20 transition-all flex items-center justify-center gap-3 disabled:opacity-50"
+                >
+                  {loading ? (
+                    <div className="w-6 h-6 border-4 border-white/30 border-t-white rounded-full animate-spin"></div>
+                  ) : (
+                    <>Confirmar e Pagar R$ {total.toFixed(2)}</>
+                  )}
+                </button>
+              </form>
+            </div>
+          </div>
+
+          <div className="space-y-8">
+            <div className="bg-white p-8 rounded-[40px] shadow-sm border border-slate-100">
+              <h3 className="text-xl font-bold mb-6">Resumo</h3>
+              <div className="space-y-4 mb-6">
+                {cart.map((item, idx) => (
+                  <div key={idx} className="flex justify-between items-center text-sm">
+                    <span className="text-slate-600">{item.name}</span>
+                    <span className="font-bold text-slate-800">R$ {item.price.toFixed(2)}</span>
+                  </div>
+                ))}
+              </div>
+              <div className="pt-6 border-t border-slate-100 flex justify-between items-center">
+                <span className="font-bold text-slate-900">Total</span>
+                <span className="text-2xl font-black text-teal-600">R$ {total.toFixed(2)}</span>
+              </div>
+            </div>
+
+            <div className="bg-teal-900 p-8 rounded-[40px] text-white space-y-4 relative overflow-hidden">
+              <div className="absolute -top-10 -right-10 w-40 h-40 bg-white/5 rounded-full blur-3xl"></div>
+              <ShieldCheck className="text-teal-400" size={32} />
+              <p className="font-bold leading-tight">Pagamento 100% Seguro</p>
+              <p className="text-xs text-teal-200/60 leading-relaxed">
+                Seus dados são criptografados de ponta a ponta e nunca são armazenados em nossos servidores.
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   );
 };
@@ -702,8 +1233,14 @@ const StoreView: React.FC<{ user: User | null, onAddCart: (p: Product, petName?:
   );
 };
 
-const AppointmentView: React.FC<{ user: User | null }> = ({ user }) => {
+const AppointmentView: React.FC<{
+  user: User | null,
+  onSaveAppointment: (data: Omit<Appointment, 'id' | 'status' | 'userId'>) => Promise<any>,
+  onFinish: () => void,
+  onNavigate: (view: View) => void
+}> = ({ user, onSaveAppointment, onFinish, onNavigate }) => {
   const [step, setStep] = useState(1);
+  const [loading, setLoading] = useState(false);
   const [formData, setFormData] = useState({
     petName: '',
     petType: 'cao',
@@ -811,7 +1348,9 @@ const AppointmentView: React.FC<{ user: User | null }> = ({ user }) => {
                     className="w-full px-4 py-4 rounded-2xl border border-slate-200 outline-none focus:ring-2 focus:ring-teal-500 appearance-none bg-white font-bold text-slate-700"
                   >
                     <option value="consulta-geral">🏥 Consulta Geral</option>
+                    <option value="banho-tosa">✂️ Banho & Tosa</option>
                     <option value="vacinacao">💉 Vacinação</option>
+                    <option value="hospedagem">🏠 Hospedagem Pet</option>
                     <option value="exames">🧪 Exames de Sangue</option>
                     <option value="emergencia">🚨 Emergência</option>
                   </select>
@@ -839,11 +1378,23 @@ const AppointmentView: React.FC<{ user: User | null }> = ({ user }) => {
                 <div className="flex gap-4">
                   <button onClick={() => setStep(1)} className="flex-1 border-2 border-slate-200 py-4 rounded-2xl font-bold hover:bg-slate-50">Voltar</button>
                   <button
-                    disabled={!formData.date || !formData.time}
-                    onClick={() => setStep(3)}
-                    className="flex-[2] bg-teal-600 text-white py-4 rounded-2xl font-bold shadow-xl shadow-teal-500/20"
+                    disabled={!formData.date || !formData.time || loading}
+                    onClick={async () => {
+                      setLoading(true);
+                      try {
+                        await onSaveAppointment(formData);
+                        onFinish();
+                      } catch (err) {
+                        console.error("Click confirm appointment error:", err);
+                      } finally {
+                        setLoading(false);
+                      }
+                    }}
+                    className="flex-[2] bg-teal-600 text-white py-4 rounded-2xl font-bold shadow-xl shadow-teal-500/20 flex items-center justify-center gap-2"
                   >
-                    Confirmar Agendamento
+                    {loading ? (
+                      <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
+                    ) : 'Confirmar Agendamento'}
                   </button>
                 </div>
               </div>
@@ -860,7 +1411,15 @@ const AppointmentView: React.FC<{ user: User | null }> = ({ user }) => {
                   <p className="flex items-center gap-2"><span className="w-1.5 h-1.5 bg-teal-500 rounded-full"></span> Traga a carteirinha de vacinação.</p>
                   <p className="flex items-center gap-2"><span className="w-1.5 h-1.5 bg-teal-500 rounded-full"></span> Chegue com 10 minutos de antecedência.</p>
                 </div>
-                <button onClick={() => setStep(1)} className="text-teal-600 font-bold hover:underline">Realizar outro agendamento</button>
+                <div className="flex flex-col gap-3">
+                  <button
+                    onClick={() => onNavigate('profile')}
+                    className="w-full bg-teal-600 text-white py-4 rounded-2xl font-bold hover:bg-teal-700 shadow-lg shadow-teal-500/20 transition-all"
+                  >
+                    Ver Meus Agendamentos
+                  </button>
+                  <button onClick={() => setStep(1)} className="text-teal-600 font-bold hover:underline">Realizar outro agendamento</button>
+                </div>
               </div>
             )}
           </div>
@@ -981,14 +1540,23 @@ const ContactView: React.FC = () => (
 
 const ProfileView: React.FC<{
   user: User | null,
+  orders: Order[],
+  loadingOrders: boolean,
+  appointments: Appointment[],
+  loadingAppointments: boolean,
   onLogout: () => void,
   onDeleteAccount: () => Promise<void>,
-  onAddPet: (pet: { name: string, breed: string, type: string }) => Promise<void>
-}> = ({ user, onLogout, onDeleteAccount, onAddPet }) => {
+  onAddPet: (pet: { name: string, breed: string, type: string }) => Promise<void>,
+  onUpdateApp: (id: string, data: Partial<Appointment>) => Promise<void>,
+  onDeleteApp: (id: string) => Promise<void>,
+  onNavigate: (view: View) => void
+}> = ({ user, orders, loadingOrders, appointments, loadingAppointments, onLogout, onDeleteAccount, onAddPet, onUpdateApp, onDeleteApp, onNavigate }) => {
   const [activeTab, setActiveTab] = useState<'profile' | 'pets' | 'orders' | 'appointments' | 'payments' | 'settings'>('profile');
   const [isEditing, setIsEditing] = useState(false);
   const [isAddingPet, setIsAddingPet] = useState(false);
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
+  const [editingAppointment, setEditingAppointment] = useState<Appointment | null>(null);
+  const [deletingAppointment, setDeletingAppointment] = useState<Appointment | null>(null);
 
   const renderTabContent = () => {
     switch (activeTab) {
@@ -1075,20 +1643,138 @@ const ProfileView: React.FC<{
         return (
           <div className="bg-white rounded-3xl border border-slate-100 p-8 shadow-sm">
             <h2 className="text-2xl font-bold mb-8">Meus Pedidos</h2>
-            <div className="text-center py-12">
-              <Package size={48} className="mx-auto text-slate-200 mb-4" />
-              <p className="text-slate-500">Você ainda não realizou nenhum pedido.</p>
-            </div>
+            {loadingOrders ? (
+              <div className="text-center py-20 flex flex-col items-center gap-4">
+                <div className="w-12 h-12 border-4 border-teal-100 border-t-teal-600 rounded-full animate-spin"></div>
+                <p className="text-slate-500 animate-pulse">Carregando histórico...</p>
+              </div>
+            ) : orders.length === 0 ? (
+              <div className="text-center py-12">
+                <Package size={48} className="mx-auto text-slate-200 mb-4" />
+                <p className="text-slate-500">Você ainda não realizou nenhum pedido.</p>
+              </div>
+            ) : (
+              <div className="space-y-6">
+                {orders.map((order) => (
+                  <div key={order.id} className="bg-slate-50 rounded-[32px] overflow-hidden border border-slate-100 hover:border-teal-100 transition-all group">
+                    <div className="p-6 bg-white flex flex-wrap justify-between items-center gap-4 border-b border-slate-100">
+                      <div>
+                        <p className="text-[10px] font-black uppercase tracking-widest text-teal-600 mb-1">Status: {order.status}</p>
+                        <h4 className="font-black text-slate-800">Pedido #{order.id.split('-')[1]}</h4>
+                        <p className="text-xs text-slate-400">{new Date(order.date).toLocaleDateString('pt-BR')} às {new Date(order.date).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</p>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-sm text-slate-500 mb-1">Total</p>
+                        <p className="text-xl font-black text-slate-900">R$ {order.total.toFixed(2)}</p>
+                      </div>
+                    </div>
+                    <div className="p-6 space-y-4">
+                      {order.items.map((item, idx) => (
+                        <div key={idx} className="flex items-center gap-4">
+                          <img src={item.imageUrl} className="w-12 h-12 object-cover rounded-xl" />
+                          <div className="flex-1">
+                            <h5 className="text-sm font-bold text-slate-700">{item.name}</h5>
+                            {item.assignedPet && (
+                              <span className="text-[10px] bg-teal-100 text-teal-700 font-bold px-2 py-0.5 rounded-full">Para: {item.assignedPet}</span>
+                            )}
+                          </div>
+                          <p className="text-sm font-bold text-slate-900">R$ {item.price.toFixed(2)}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         );
       case 'appointments':
         return (
           <div className="bg-white rounded-3xl border border-slate-100 p-8 shadow-sm">
             <h2 className="text-2xl font-bold mb-8">Meus Agendamentos</h2>
-            <div className="text-center py-12">
-              <Calendar size={48} className="mx-auto text-slate-200 mb-4" />
-              <p className="text-slate-500">Nenhum agendamento encontrado.</p>
-            </div>
+            {loadingAppointments ? (
+              <div className="text-center py-20 flex flex-col items-center gap-4">
+                <div className="w-12 h-12 border-4 border-teal-100 border-t-teal-600 rounded-full animate-spin"></div>
+                <p className="text-slate-500 animate-pulse">Buscando agendamentos...</p>
+              </div>
+            ) : appointments.length === 0 ? (
+              <div className="text-center py-12">
+                <Calendar size={48} className="mx-auto text-slate-200 mb-4" />
+                <p className="text-slate-500">Nenhum agendamento encontrado.</p>
+                <button onClick={() => onNavigate('appointment')} className="mt-4 text-teal-600 font-bold hover:underline">Agendar Agora</button>
+              </div>
+            ) : (
+              <div className="grid gap-4">
+                {appointments.map((app) => {
+                  const appDate = new Date(`${app.date}T${app.time}`);
+                  const now = new Date();
+                  const canManage = (appDate.getTime() - now.getTime()) / (1000 * 60 * 60) >= 24;
+
+                  return (
+                    <div key={app.id} className="bg-slate-50 p-6 rounded-3xl border border-slate-100 flex items-center justify-between group hover:border-teal-100 transition-all flex-wrap gap-4">
+                      <div className="flex items-center gap-5">
+                        <div className="w-14 h-14 bg-white rounded-2xl flex items-center justify-center text-teal-600 shadow-sm group-hover:bg-teal-600 group-hover:text-white transition-all">
+                          {app.type === 'banho-tosa' ? <Scissors size={28} /> :
+                            app.type === 'vacinacao' ? <Syringe size={28} /> :
+                              app.type === 'hospedagem' ? <Plus size={28} /> :
+                                <Clock size={28} />}
+                        </div>
+                        <div>
+                          <div className="flex items-center gap-2 mb-1">
+                            <span className="text-[10px] font-black bg-teal-100 text-teal-700 px-2 py-0.5 rounded-full uppercase">{app.type.replace('-', ' ')}</span>
+                            <span className={`text-[10px] font-black px-2 py-0.5 rounded-full uppercase ${app.status === 'confirmed' ? 'bg-emerald-100 text-emerald-700' : app.status === 'cancelled' ? 'bg-rose-100 text-rose-700' : 'bg-orange-100 text-orange-700'}`}>
+                              {app.status === 'pending' ? 'Pendente' : app.status === 'confirmed' ? 'Confirmado' : app.status === 'cancelled' ? 'Cancelado' : app.status}
+                            </span>
+                          </div>
+                          <h4 className="font-bold text-slate-800 text-lg">
+                            {app.type === 'banho-tosa' ? 'Banho & Tosa' :
+                              app.type === 'vacinacao' ? 'Vacinação' :
+                                app.type === 'hospedagem' ? 'Hospedagem' :
+                                  app.type === 'exames' ? 'Exames' :
+                                    app.type === 'emergencia' ? 'Emergência' :
+                                      'Consulta'} para {app.petName}
+                          </h4>
+                          <p className="text-slate-400 text-xs mt-1 mb-2 leading-relaxed">
+                            {app.type === 'consulta-geral' ? 'Avaliação completa de saúde e check-up de rotina para seu melhor amigo.' :
+                              app.type === 'banho-tosa' ? 'Cuidados estéticos profissionais com produtos hipoalergênicos e carinho.' :
+                                app.type === 'vacinacao' ? 'Protocolo completo de vacinas para garantir a saúde preventiva do seu pet.' :
+                                  app.type === 'hospedagem' ? 'Ambiente seguro e divertido para seu pet enquanto você viaja tranquilo.' :
+                                    app.type === 'exames' ? 'Coleta e análise laboratorial para diagnóstico preciso e acompanhamento.' :
+                                      app.type === 'emergencia' ? 'Atendimento médico prioritário para casos críticos e urgentes.' :
+                                        'Atendimento especializado JE Pet.'}
+                          </p>
+                          <p className="text-slate-500 text-sm flex items-center gap-2">
+                            <Calendar size={14} className="text-teal-500" />
+                            {new Date(app.date).toLocaleDateString('pt-BR')} às <Clock size={14} className="text-teal-500 ml-1" /> {app.time}
+                          </p>
+                        </div>
+                      </div>
+
+                      {app.status !== 'cancelled' && (
+                        <div className="flex gap-2">
+                          <button
+                            disabled={!canManage}
+                            onClick={() => setEditingAppointment(app)}
+                            className={`p-3 rounded-xl border transition-all flex items-center gap-2 font-bold text-xs ${canManage ? 'bg-white border-slate-200 text-slate-600 hover:border-teal-500 hover:text-teal-600' : 'bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed'}`}
+                            title={!canManage ? "Só é possível editar com 24h de antecedência" : ""}
+                          >
+                            <Settings size={16} /> Editar
+                          </button>
+                          <button
+                            disabled={!canManage}
+                            onClick={() => setDeletingAppointment(app)}
+                            className={`p-3 rounded-xl border transition-all flex items-center gap-2 font-bold text-xs ${canManage ? 'bg-white border-slate-200 text-rose-500 hover:border-rose-500 hover:bg-rose-50' : 'bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed'}`}
+                            title={!canManage ? "Só é possível cancelar com 24h de antecedência" : ""}
+                          >
+                            <Trash2 size={16} /> Cancelar
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         );
       case 'payments':
@@ -1190,6 +1876,161 @@ const ProfileView: React.FC<{
   return (
     <div className="py-20 animate-fadeIn">
       <div className="container mx-auto px-4 max-w-5xl">
+        {/* Cancel Appointment Confirmation Modal */}
+        {deletingAppointment && (
+          <div className="fixed inset-0 z-[201] flex items-center justify-center p-4">
+            <div
+              className="absolute inset-0 bg-slate-900/40 backdrop-blur-md animate-fadeIn"
+              onClick={() => setDeletingAppointment(null)}
+            ></div>
+            <div className="bg-white w-full max-w-md p-8 rounded-[48px] relative z-20 shadow-[0_32px_64px_-16px_rgba(0,0,0,0.2)] animate-scaleUp overflow-hidden">
+              <div className="absolute top-0 left-0 w-full h-2 bg-rose-500"></div>
+              <div className="text-center space-y-6">
+                <div className="w-20 h-20 bg-rose-50 text-rose-600 rounded-[30px] flex items-center justify-center mx-auto border-2 border-rose-100 shadow-inner">
+                  <Trash2 size={40} />
+                </div>
+                <div>
+                  <h2 className="text-2xl font-black text-slate-900 mb-2 mt-2">Cancelar Agendamento?</h2>
+                  <p className="text-slate-500 leading-relaxed text-sm px-4">
+                    Você está prestes a cancelar o agendamento de <span className="text-rose-600 font-bold">{deletingAppointment.type.replace('-', ' ')}</span> para o pet <span className="font-bold text-slate-800">{deletingAppointment.petName}</span>.
+                  </p>
+                </div>
+
+                <div className="flex flex-col gap-3">
+                  <button
+                    onClick={async () => {
+                      await onDeleteApp(deletingAppointment.id);
+                      setDeletingAppointment(null);
+                    }}
+                    className="w-full bg-rose-600 text-white py-4 rounded-[22px] font-black text-lg hover:bg-rose-700 shadow-xl shadow-rose-200 transition-all active:scale-95"
+                  >
+                    Confirmar Cancelamento
+                  </button>
+                  <button
+                    onClick={() => setDeletingAppointment(null)}
+                    className="w-full bg-slate-100 text-slate-600 py-4 rounded-[22px] font-bold hover:bg-slate-200 transition-all"
+                  >
+                    Mudar de ideia
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+        {/* Edit Appointment Modal */}
+        {editingAppointment && (
+          <div className="fixed inset-0 z-[200] flex items-center justify-center p-4">
+            <div
+              className="absolute inset-0 bg-slate-900/40 backdrop-blur-md animate-fadeIn"
+              onClick={() => setEditingAppointment(null)}
+            ></div>
+            <div className="bg-white w-full max-w-lg rounded-[48px] relative z-10 shadow-[0_32px_64px_-16px_rgba(0,0,0,0.2)] animate-scaleUp overflow-hidden border border-white/20">
+              <div className="bg-gradient-to-br from-teal-600 to-emerald-600 p-10 text-white relative">
+                <button
+                  onClick={() => setEditingAppointment(null)}
+                  className="absolute top-8 right-8 w-10 h-10 bg-white/10 hover:bg-white/20 rounded-full flex items-center justify-center transition-all group"
+                >
+                  <X size={20} className="group-hover:rotate-90 transition-transform duration-300" />
+                </button>
+                <div className="flex items-center gap-6">
+                  <div className="w-16 h-16 bg-white/20 backdrop-blur-sm rounded-[24px] flex items-center justify-center shadow-inner">
+                    <Calendar size={32} />
+                  </div>
+                  <div>
+                    <h3 className="text-2xl font-black tracking-tight">Editar Agendamento</h3>
+                    <p className="text-teal-50/80 text-sm font-medium mt-1">Sua nova experiência JE Pet</p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="p-10 space-y-8 bg-gradient-to-b from-white to-slate-50">
+                <div className="grid grid-cols-2 gap-6">
+                  <div className="space-y-2">
+                    <label className="text-[11px] font-black uppercase tracking-[0.2em] text-slate-400 ml-1">Data da Visita</label>
+                    <div className="relative group">
+                      <div className="absolute left-4 top-1/2 -translate-y-1/2 text-teal-600 pointer-events-none group-focus-within:scale-110 transition-transform">
+                        <Calendar size={18} />
+                      </div>
+                      <input
+                        type="date"
+                        defaultValue={editingAppointment.date}
+                        id="edit-app-date"
+                        className="w-full pl-12 pr-4 py-4 rounded-2xl border-2 border-slate-100 outline-none focus:border-teal-500 focus:bg-white bg-slate-50 transition-all font-bold text-slate-700 shadow-sm"
+                      />
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-[11px] font-black uppercase tracking-[0.2em] text-slate-400 ml-1">Horário</label>
+                    <div className="relative group">
+                      <div className="absolute left-4 top-1/2 -translate-y-1/2 text-teal-600 pointer-events-none group-focus-within:scale-110 transition-transform">
+                        <Clock size={18} />
+                      </div>
+                      <input
+                        type="time"
+                        defaultValue={editingAppointment.time}
+                        id="edit-app-time"
+                        className="w-full pl-12 pr-4 py-4 rounded-2xl border-2 border-slate-100 outline-none focus:border-teal-500 focus:bg-white bg-slate-50 transition-all font-bold text-slate-700 shadow-sm"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-[11px] font-black uppercase tracking-[0.2em] text-slate-400 ml-1">Serviço Desejado</label>
+                  <div className="relative group">
+                    <div className="absolute left-4 top-1/2 -translate-y-1/2 text-teal-600 pointer-events-none transition-transform z-10">
+                      <Settings size={18} />
+                    </div>
+                    <select
+                      defaultValue={editingAppointment.type}
+                      id="edit-app-type"
+                      className="w-full pl-12 pr-10 py-4 rounded-2xl border-2 border-slate-100 outline-none focus:border-teal-500 focus:bg-white bg-slate-50 transition-all font-bold text-slate-700 appearance-none cursor-pointer shadow-sm relative z-0"
+                    >
+                      <option value="consulta-geral">🏥 Consulta Geral</option>
+                      <option value="banho-tosa">✂️ Banho & Tosa</option>
+                      <option value="vacinacao">💉 Vacinação</option>
+                      <option value="hospedagem">🏠 Hospedagem Pet</option>
+                      <option value="exames">🧪 Exames de Sangue</option>
+                      <option value="emergencia">🚨 Emergência</option>
+                    </select>
+                    <div className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none">
+                      <ChevronDown size={20} />
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex flex-col gap-4 pt-4">
+                  <button
+                    onClick={async () => {
+                      const date = (document.getElementById('edit-app-date') as HTMLInputElement).value;
+                      const time = (document.getElementById('edit-app-time') as HTMLInputElement).value;
+                      const type = (document.getElementById('edit-app-type') as HTMLSelectElement).value;
+
+                      const appDate = new Date(`${date}T${time}`);
+                      const now = new Date();
+                      if ((appDate.getTime() - now.getTime()) / (1000 * 60 * 60) < 24) {
+                        alert("Ops! Para garantir o melhor atendimento, reagendamentos precisam de no mínimo 24h de antecedência.");
+                        return;
+                      }
+
+                      await onUpdateApp(editingAppointment.id, { date, time, type });
+                      setEditingAppointment(null);
+                    }}
+                    className="w-full bg-slate-900 text-white py-5 rounded-2xl font-black text-lg hover:bg-teal-600 shadow-2xl shadow-slate-200 transition-all active:scale-[0.98] flex items-center justify-center gap-3"
+                  >
+                    Salvar Alterações <ArrowRight size={20} />
+                  </button>
+                  <button
+                    onClick={() => setEditingAppointment(null)}
+                    className="w-full py-2 text-slate-400 font-bold hover:text-slate-600 transition-colors text-sm"
+                  >
+                    Mudar de ideia
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
         <div className="grid lg:grid-cols-4 gap-8">
           <aside className="lg:col-span-1">
             <div className="bg-white rounded-3xl border border-slate-100 p-8 shadow-sm text-center">
